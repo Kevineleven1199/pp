@@ -912,28 +912,66 @@ export default function PyramidPage() {
       <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e2636', background: liveTrading ? '#0a1a0f' : '#0d1219' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
           {/* Account Balance & API Limits */}
-          <div style={{ flex: '0 0 auto', display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8 }}>
-            {/* Balance Display */}
-            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: '1px solid #2d3748' }}>
-              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>MARGIN BALANCE</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#f0b429', fontFamily: 'monospace' }}>
-                {accountBalance ? `$${accountBalance.marginBalance.toFixed(2)}` : '—'}
+          <div style={{ flex: '0 0 auto', display: 'flex', gap: 8, alignItems: 'stretch', marginBottom: 8, flexWrap: 'wrap' }}>
+            {/* Total Balance */}
+            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: '1px solid #2d3748', minWidth: 100 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>TOTAL BALANCE</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#f0b429', fontFamily: 'monospace' }}>
+                ${accountBalance ? (accountBalance.marginBalance + (accountBalance.unrealizedPnl || 0)).toFixed(2) : '—'}
               </div>
-              {accountBalance && accountBalance.unrealizedPnl !== 0 && (
-                <div style={{ fontSize: 9, color: accountBalance.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5' }}>
-                  uPnL: {accountBalance.unrealizedPnl >= 0 ? '+' : ''}${accountBalance.unrealizedPnl.toFixed(2)}
+            </div>
+            
+            {/* Available Balance */}
+            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: '1px solid #2d3748', minWidth: 90 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>AVAILABLE</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#9aa4b2', fontFamily: 'monospace' }}>
+                ${accountBalance?.availableBalance?.toFixed(2) || '—'}
+              </div>
+            </div>
+            
+            {/* Margin Used */}
+            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: '1px solid #2d3748', minWidth: 90 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>MARGIN USED</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#60a5fa', fontFamily: 'monospace' }}>
+                ${accountBalance ? (accountBalance.marginBalance - (accountBalance.availableBalance || 0)).toFixed(2) : '—'}
+              </div>
+            </div>
+            
+            {/* Unrealized P&L with % */}
+            <div style={{ 
+              padding: '8px 12px', 
+              background: accountBalance?.unrealizedPnl && accountBalance.unrealizedPnl >= 0 ? '#0a1a0f' : '#1a0f0f', 
+              borderRadius: 6, 
+              border: `1px solid ${accountBalance?.unrealizedPnl && accountBalance.unrealizedPnl >= 0 ? '#22c55e' : '#ef4444'}`,
+              minWidth: 110
+            }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>UNREALIZED P&L</div>
+              <div style={{ 
+                fontSize: 14, 
+                fontWeight: 700, 
+                color: accountBalance?.unrealizedPnl && accountBalance.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5', 
+                fontFamily: 'monospace' 
+              }}>
+                {accountBalance?.unrealizedPnl !== undefined 
+                  ? `${accountBalance.unrealizedPnl >= 0 ? '+' : ''}$${accountBalance.unrealizedPnl.toFixed(2)}`
+                  : '—'}
+              </div>
+              {accountBalance?.marginBalance && accountBalance.marginBalance > 0 && accountBalance?.unrealizedPnl !== undefined && (
+                <div style={{ 
+                  fontSize: 10, 
+                  color: accountBalance.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5',
+                  fontFamily: 'monospace'
+                }}>
+                  {accountBalance.unrealizedPnl >= 0 ? '+' : ''}{((accountBalance.unrealizedPnl / accountBalance.marginBalance) * 100).toFixed(2)}%
                 </div>
               )}
             </div>
             
             {/* API Rate Limit */}
-            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: `1px solid ${apiRateLimits.used > apiRateLimits.limit * 0.8 ? '#f59e0b' : '#2d3748'}` }}>
-              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>API CALLS</div>
+            <div style={{ padding: '8px 12px', background: '#111820', borderRadius: 6, border: `1px solid ${apiRateLimits.used > apiRateLimits.limit * 0.8 ? '#f59e0b' : '#2d3748'}`, minWidth: 70 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>API</div>
               <div style={{ fontSize: 12, fontWeight: 600, color: apiRateLimits.used > apiRateLimits.limit * 0.8 ? '#f59e0b' : '#9aa4b2', fontFamily: 'monospace' }}>
-                {apiRateLimits.used} / {apiRateLimits.limit}
-              </div>
-              <div style={{ fontSize: 9, color: '#6b7785' }}>
-                per min
+                {apiRateLimits.used}/{apiRateLimits.limit}
               </div>
             </div>
           </div>
@@ -1241,18 +1279,58 @@ export default function PyramidPage() {
                   Level {livePyramid.level}/{livePyramid.maxLevels}
                 </div>
                 
-                {/* P&L Display */}
-                <div style={{ 
-                  fontSize: 20, 
-                  fontWeight: 700, 
-                  color: livePyramid.pnlPercent >= 0 ? '#4ade80' : '#fca5a5',
-                  marginBottom: 8
-                }}>
-                  {livePyramid.pnlPercent >= 0 ? '+' : ''}{livePyramid.pnlPercent?.toFixed(3)}%
-                  <span style={{ fontSize: 12, marginLeft: 8 }}>
-                    (${livePyramid.pnlUsd?.toFixed(2)})
-                  </span>
-                </div>
+                {/* P&L Display - Detailed */}
+                {(() => {
+                  const notionalValue = (livePyramid.entries?.reduce((sum, e) => sum + (e.price * e.size), 0) || 0)
+                  const currentNotional = (livePyramid.entries?.reduce((sum, e) => sum + e.size, 0) || 0) * livePrice
+                  const entryFee = notionalValue * 0.0006 // 0.06% taker fee
+                  const exitFee = currentNotional * 0.0006 // Estimated exit fee
+                  const totalFees = entryFee + exitFee
+                  const grossPnl = livePyramid.pnlUsd || 0
+                  const netPnl = grossPnl - totalFees
+                  const marginUsed = accountBalance ? (accountBalance.marginBalance - (accountBalance.availableBalance || 0)) : 0
+                  const roi = marginUsed > 0 ? (netPnl / marginUsed) * 100 : 0
+                  
+                  return (
+                    <>
+                      <div style={{ 
+                        fontSize: 22, 
+                        fontWeight: 700, 
+                        color: netPnl >= 0 ? '#4ade80' : '#fca5a5',
+                        marginBottom: 4
+                      }}>
+                        {netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}
+                        <span style={{ fontSize: 11, marginLeft: 6, color: '#9aa4b2' }}>net</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: '#9aa4b2', marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Price Move:</span>
+                          <span style={{ color: livePyramid.pnlPercent >= 0 ? '#4ade80' : '#fca5a5', fontFamily: 'monospace' }}>
+                            {livePyramid.pnlPercent >= 0 ? '+' : ''}{livePyramid.pnlPercent?.toFixed(3)}%
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Gross P&L:</span>
+                          <span style={{ color: grossPnl >= 0 ? '#4ade80' : '#fca5a5', fontFamily: 'monospace' }}>
+                            {grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(2)}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Fees (0.06%):</span>
+                          <span style={{ color: '#f59e0b', fontFamily: 'monospace' }}>
+                            -${totalFees.toFixed(2)}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #2d3748', paddingTop: 4, marginTop: 4 }}>
+                          <span style={{ fontWeight: 600 }}>ROI on Margin:</span>
+                          <span style={{ color: roi >= 0 ? '#4ade80' : '#fca5a5', fontFamily: 'monospace', fontWeight: 700 }}>
+                            {roi >= 0 ? '+' : ''}{roi.toFixed(1)}%
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )
+                })()}
 
                 {/* Trailing Stop & EMAs */}
                 <div style={{ fontSize: 10, color: '#9aa4b2', lineHeight: 1.6 }}>
