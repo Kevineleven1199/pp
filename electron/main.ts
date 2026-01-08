@@ -480,6 +480,138 @@ app.whenReady().then(() => {
     }
   }
   
+  // ═══════════════════════════════════════════════════════════════════
+  // PERSISTENT TRADE HISTORY & PERFORMANCE
+  // ═══════════════════════════════════════════════════════════════════
+  const traderDataDir = path.join(app.getPath('userData'), 'data')
+  const tradeHistoryFile = path.join(traderDataDir, 'trade-history.json')
+  const performanceFile = path.join(traderDataDir, 'performance.json')
+  
+  interface TradeRecord {
+    id: string
+    timestamp: number
+    action: string
+    side: 'long' | 'short' | 'close'
+    price: number
+    quantity: number
+    marginUsd: number
+    pnl: number
+    fees: number
+    reason?: string
+    confluenceScore?: number
+    pyramidLevel?: number
+  }
+  
+  interface PerformanceRecord {
+    totalTrades: number
+    winningTrades: number
+    losingTrades: number
+    totalPnl: number
+    totalFees: number
+    largestWin: number
+    largestLoss: number
+    winRate: number
+    lastUpdated: number
+  }
+  
+  let tradeHistory: TradeRecord[] = []
+  let persistedPerformance: PerformanceRecord = {
+    totalTrades: 0,
+    winningTrades: 0,
+    losingTrades: 0,
+    totalPnl: 0,
+    totalFees: 0,
+    largestWin: 0,
+    largestLoss: 0,
+    winRate: 0,
+    lastUpdated: Date.now()
+  }
+  
+  function loadTradeHistory(): TradeRecord[] {
+    try {
+      if (fs.existsSync(tradeHistoryFile)) {
+        const data = fs.readFileSync(tradeHistoryFile, 'utf-8')
+        const history = JSON.parse(data)
+        console.log(`[Trader] Loaded ${history.length} trades from history`)
+        return history
+      }
+    } catch (err) {
+      console.error('[Trader] Failed to load trade history:', err)
+    }
+    return []
+  }
+  
+  function saveTradeHistory(): void {
+    try {
+      fs.writeFileSync(tradeHistoryFile, JSON.stringify(tradeHistory, null, 2), 'utf-8')
+      console.log(`[Trader] Saved ${tradeHistory.length} trades to history`)
+    } catch (err) {
+      console.error('[Trader] Failed to save trade history:', err)
+    }
+  }
+  
+  function loadPerformance(): PerformanceRecord {
+    try {
+      if (fs.existsSync(performanceFile)) {
+        const data = fs.readFileSync(performanceFile, 'utf-8')
+        const perf = JSON.parse(data)
+        console.log(`[Trader] Loaded performance: ${perf.totalTrades} trades, $${perf.totalPnl?.toFixed(2)} P&L`)
+        return perf
+      }
+    } catch (err) {
+      console.error('[Trader] Failed to load performance:', err)
+    }
+    return persistedPerformance
+  }
+  
+  function savePerformance(): void {
+    try {
+      persistedPerformance.lastUpdated = Date.now()
+      persistedPerformance.winRate = persistedPerformance.totalTrades > 0 
+        ? (persistedPerformance.winningTrades / persistedPerformance.totalTrades) * 100 
+        : 0
+      fs.writeFileSync(performanceFile, JSON.stringify(persistedPerformance, null, 2), 'utf-8')
+      console.log(`[Trader] Saved performance: ${persistedPerformance.totalTrades} trades`)
+    } catch (err) {
+      console.error('[Trader] Failed to save performance:', err)
+    }
+  }
+  
+  function recordTrade(trade: TradeRecord): void {
+    tradeHistory.unshift(trade) // Add to front (newest first)
+    if (tradeHistory.length > 1000) {
+      tradeHistory = tradeHistory.slice(0, 1000) // Keep last 1000 trades
+    }
+    saveTradeHistory()
+    
+    // Update performance
+    if (trade.action === 'CLOSE' || trade.side === 'close') {
+      persistedPerformance.totalTrades++
+      persistedPerformance.totalPnl += trade.pnl
+      persistedPerformance.totalFees += trade.fees || 0
+      
+      if (trade.pnl >= 0) {
+        persistedPerformance.winningTrades++
+        if (trade.pnl > persistedPerformance.largestWin) {
+          persistedPerformance.largestWin = trade.pnl
+        }
+      } else {
+        persistedPerformance.losingTrades++
+        if (trade.pnl < persistedPerformance.largestLoss) {
+          persistedPerformance.largestLoss = trade.pnl
+        }
+      }
+      savePerformance()
+    }
+    
+    // Send updated history to UI
+    mainWindow?.webContents.send('trader:historyUpdate', tradeHistory)
+  }
+  
+  // Load history on module init
+  tradeHistory = loadTradeHistory()
+  persistedPerformance = loadPerformance()
+  
   // Core state
   let traderStartTime = 0
   let traderRunning = false
@@ -1241,18 +1373,22 @@ app.whenReady().then(() => {
       
       const result = await executeTrade(side, marginUsd)
       
-      // Send trade update to UI
-      mainWindow?.webContents.send('trader:trade', {
+      // Record and persist the trade
+      const tradeRecord: TradeRecord = {
         id: result.orderId || `test-${Date.now()}`,
+        timestamp: Date.now(),
         action: `TEST_${side.toUpperCase()}`,
         side,
+        price: result.price || lastKnownPrice,
+        quantity: result.quantity || 0,
         marginUsd,
-        price: result.price,
-        quantity: result.quantity,
-        notionalValue: result.notional,
-        status: 'filled',
-        timestamp: Date.now()
-      })
+        pnl: 0,
+        fees: (result.notional || marginUsd * 88) * 0.0006
+      }
+      recordTrade(tradeRecord)
+      
+      // Send trade update to UI
+      mainWindow?.webContents.send('trader:trade', tradeRecord)
       
       return result
     } catch (err: any) {
@@ -1307,7 +1443,22 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('trader:getPerformance', async () => {
-    return traderPerformance
+    // Merge session performance with persisted
+    return {
+      ...traderPerformance,
+      totalPnl: persistedPerformance.totalPnl,
+      totalTrades: persistedPerformance.totalTrades,
+      winningTrades: persistedPerformance.winningTrades,
+      winRate: persistedPerformance.winRate,
+      largestWin: persistedPerformance.largestWin,
+      largestLoss: persistedPerformance.largestLoss,
+      totalFees: persistedPerformance.totalFees
+    }
+  })
+  
+  // Get trade history
+  ipcMain.handle('trader:getTradeHistory', async () => {
+    return tradeHistory
   })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets
@@ -1718,20 +1869,31 @@ app.whenReady().then(() => {
               try {
                 await closeAllPositions()
                 
-                mainWindow?.webContents.send('trader:trade', {
+                // Calculate fees for the trade
+                const notionalValue = pyramidState.entries.reduce((sum, e) => sum + (e.price * e.size), 0)
+                const exitNotional = currentPosition.size * price
+                const totalFees = (notionalValue + exitNotional) * 0.0006
+                
+                // Record and persist the exit trade
+                const exitRecord: TradeRecord = {
                   id: `exit-${Date.now()}`,
+                  timestamp: Date.now(),
                   action: 'CLOSE',
                   side: 'close',
                   price,
                   quantity: currentPosition.size,
-                  status: 'filled',
-                  timestamp: Date.now(),
-                  pnl: pnlUsd,
+                  marginUsd: pyramidState.entries.reduce((sum, e) => sum + (e.size * e.price / 88), 0),
+                  pnl: pnlUsd - totalFees, // Net P&L after fees
+                  fees: totalFees,
                   reason: exitReason,
-                  pyramidLevel: pyramidState.level
-                })
+                  pyramidLevel: pyramidState.level,
+                  confluenceScore: confluenceScore
+                }
+                recordTrade(exitRecord)
                 
-                // Track performance
+                mainWindow?.webContents.send('trader:trade', exitRecord)
+                
+                // Track session performance (persisted performance updated in recordTrade)
                 traderPerformance.totalPnl += pnlUsd
                 if (pnlUsd > 0) {
                   traderPerformance.winningTrades++

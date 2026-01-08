@@ -634,6 +634,41 @@ export default function PyramidPage() {
     ;(window as any).pricePerfect.trader?.getBalance().then((bal: any) => {
       if (bal) setAccountBalance(bal)
     }).catch(() => {})
+    
+    // Load persisted trade history
+    ;(window as any).pricePerfect.trader?.getTradeHistory().then((history: any[]) => {
+      if (history && history.length > 0) {
+        console.log(`[PyramidPage] Loaded ${history.length} trades from history`)
+        const logs = history.map((t: any) => ({
+          id: t.id,
+          timestamp: t.timestamp,
+          action: t.action,
+          side: t.side,
+          price: t.price,
+          size: t.quantity || 0,
+          status: 'filled' as const,
+          pnl: t.pnl
+        }))
+        setTradeLogs(logs)
+      }
+    }).catch(() => {})
+    
+    // Listen for history updates
+    const offHistoryUpdate = (window as any).pricePerfect.trader?.on('historyUpdate', (history: any[]) => {
+      if (history && history.length > 0) {
+        const logs = history.map((t: any) => ({
+          id: t.id,
+          timestamp: t.timestamp,
+          action: t.action,
+          side: t.side,
+          price: t.price,
+          size: t.quantity || 0,
+          status: 'filled' as const,
+          pnl: t.pnl
+        }))
+        setTradeLogs(logs)
+      }
+    })
 
     return () => {
       offHealth?.()
@@ -641,6 +676,7 @@ export default function PyramidPage() {
       offTrade?.()
       offLiveUpdate?.()
       offPyramidUpdate?.()
+      offHistoryUpdate?.()
     }
   }, [livePrice])
 
