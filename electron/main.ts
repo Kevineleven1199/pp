@@ -1722,61 +1722,138 @@ app.whenReady().then(() => {
           
           let confluenceScore = 0
           const confluenceFactors: string[] = []
-          
-          // NYSE Session: 14:30-21:00 UTC (9:30am-4pm ET) - Weekdays only
           const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5
-          const nyseOpen = isWeekday && ((utcHour === 14 && utcMinute >= 30) || (utcHour >= 15 && utcHour < 21))
-          if (nyseOpen) {
-            confluenceScore += 5
-            confluenceFactors.push('NYSE Open')
-          }
           
-          // London Session: 08:00-16:30 UTC - Weekdays only
+          // ═══════════════════════════════════════════════════════════════════
+          // 24/7 SESSION-AWARE CONFLUENCE - Trade best factors for CURRENT session
+          // ═══════════════════════════════════════════════════════════════════
+          
+          // Determine active session
+          const nyseOpen = isWeekday && (utcHour > 14 || (utcHour === 14 && utcMinute >= 30)) && utcHour < 21
           const londonOpen = isWeekday && (utcHour >= 8 && (utcHour < 16 || (utcHour === 16 && utcMinute <= 30)))
-          if (londonOpen) {
-            confluenceScore += 4
-            confluenceFactors.push('London Open')
-          }
+          const tokyoOpen = (utcHour >= 0 && utcHour < 9)
+          const sydneyOpen = (utcHour >= 22 || utcHour < 7)
           
-          // Tokyo Session: 00:00-09:00 UTC
-          const tokyoOpen = (utcHour >= 0 && utcHour < 9) && (isWeekday || dayOfWeek === 0)
-          if (tokyoOpen) {
-            confluenceScore += 3
-            confluenceFactors.push('Tokyo Open')
-          }
+          // After-hours = major sessions closed but still weekday
+          const afterHours = isWeekday && !nyseOpen && !londonOpen && utcHour >= 21
+          // Pre-market = before London opens
+          const preMarket = isWeekday && utcHour >= 5 && utcHour < 8
           
-          // Overlap bonus
-          if (nyseOpen && londonOpen) {
+          // Session identification for logging
+          let currentSession = 'Off-Hours'
+          if (nyseOpen && londonOpen) currentSession = 'NYSE+London Overlap'
+          else if (nyseOpen) currentSession = 'NYSE Session'
+          else if (londonOpen) currentSession = 'London Session'
+          else if (tokyoOpen) currentSession = 'Tokyo Session'
+          else if (sydneyOpen) currentSession = 'Sydney Session'
+          else if (afterHours) currentSession = 'After-Hours'
+          else if (preMarket) currentSession = 'Pre-Market'
+          
+          confluenceFactors.push(currentSession)
+          
+          // ═══════════════════════════════════════════════════════════════════
+          // SESSION-SPECIFIC CONFLUENCE - Each session has its own best factors
+          // ═══════════════════════════════════════════════════════════════════
+          
+          // Base score for being in ANY tradeable session
+          if (nyseOpen || londonOpen || tokyoOpen || sydneyOpen) {
             confluenceScore += 2
-            confluenceFactors.push('Session Overlap')
           }
           
-          // Price momentum
-          let priceTrend: 'bullish' | 'bearish' | 'neutral' = 'neutral'
-          if (lastKnownPrice > 0 && price > 0) {
-            const priceChange = ((price - lastKnownPrice) / lastKnownPrice) * 100
-            if (priceChange > 0.05) {
-              priceTrend = 'bullish'
+          // NYSE Session bonuses
+          if (nyseOpen) {
+            confluenceScore += 3 // High volume, best liquidity
+            // First 30 min and last 30 min are power hours
+            if ((utcHour === 14 && utcMinute >= 30) || (utcHour === 15 && utcMinute < 30)) {
               confluenceScore += 2
-              confluenceFactors.push('Bullish Momentum')
-            } else if (priceChange < -0.05) {
-              priceTrend = 'bearish'
+              confluenceFactors.push('NYSE Power Hour Open')
+            }
+            if (utcHour === 20 && utcMinute >= 30) {
               confluenceScore += 2
-              confluenceFactors.push('Bearish Momentum')
+              confluenceFactors.push('NYSE Power Hour Close')
             }
           }
           
-          // Day of week edge (Tue-Thu best)
-          if (dayOfWeek >= 2 && dayOfWeek <= 4) {
-            confluenceScore += 1
-            confluenceFactors.push('Prime Day')
+          // London Session bonuses
+          if (londonOpen) {
+            confluenceScore += 2
+            // London open volatility
+            if (utcHour >= 8 && utcHour < 10) {
+              confluenceScore += 1
+              confluenceFactors.push('London Open Volatility')
+            }
           }
           
-          // Low liquidity penalty
-          const isLowLiquidity = dayOfWeek === 0 || dayOfWeek === 6 || (dayOfWeek === 1 && utcHour < 8)
-          if (isLowLiquidity) {
-            confluenceScore = Math.max(0, confluenceScore - 3)
-            confluenceFactors.push('Low Liquidity')
+          // Overlap bonus - most liquid time
+          if (nyseOpen && londonOpen) {
+            confluenceScore += 3
+            confluenceFactors.push('Session Overlap')
+          }
+          
+          // Tokyo/Asia Session - often sets direction for day
+          if (tokyoOpen) {
+            confluenceScore += 2
+            confluenceFactors.push('Asia Active')
+          }
+          
+          // After-hours - often produces clean one-way moves
+          if (afterHours) {
+            confluenceScore += 2 // Still tradeable! Often less noise
+            confluenceFactors.push('Clean After-Hours')
+          }
+          
+          // Pre-market positioning
+          if (preMarket) {
+            confluenceScore += 1
+            confluenceFactors.push('Pre-Market')
+          }
+          
+          // ═══════════════════════════════════════════════════════════════════
+          // PRICE ACTION FACTORS - Always relevant regardless of session
+          // ═══════════════════════════════════════════════════════════════════
+          
+          let priceTrend: 'bullish' | 'bearish' | 'neutral' = 'neutral'
+          if (lastKnownPrice > 0 && price > 0) {
+            const priceChange = ((price - lastKnownPrice) / lastKnownPrice) * 100
+            if (priceChange > 0.03) {
+              priceTrend = 'bullish'
+              confluenceScore += 2
+              confluenceFactors.push('Bullish Move')
+            } else if (priceChange < -0.03) {
+              priceTrend = 'bearish'
+              confluenceScore += 2
+              confluenceFactors.push('Bearish Move')
+            }
+          }
+          
+          // Day of week context
+          if (dayOfWeek >= 2 && dayOfWeek <= 4) {
+            confluenceScore += 1
+            confluenceFactors.push('Mid-Week')
+          }
+          
+          // Month-end/Quarter-end rebalancing (more volatility)
+          const dayOfMonth = now.getUTCDate()
+          const month = now.getUTCMonth()
+          if (dayOfMonth >= 28 || dayOfMonth <= 2) {
+            confluenceScore += 1
+            confluenceFactors.push('Month End/Start')
+          }
+          if ((month === 2 || month === 5 || month === 8 || month === 11) && dayOfMonth >= 28) {
+            confluenceScore += 1
+            confluenceFactors.push('Quarter End')
+          }
+          
+          // Weekend low liquidity warning (but still tradeable!)
+          const isWeekend = dayOfWeek === 0 || dayOfWeek === 6
+          if (isWeekend) {
+            confluenceFactors.push('Weekend - Lower Vol')
+            // Don't penalize heavily - crypto trades 24/7
+          }
+          
+          // Early Monday warning
+          if (dayOfWeek === 1 && utcHour < 8) {
+            confluenceFactors.push('Early Monday')
           }
           
           console.log(`[Trader] Live confluence: ${confluenceScore}/${traderConfig.minConfluenceToEnter} [${confluenceFactors.join(', ')}]`)
