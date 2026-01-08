@@ -512,6 +512,110 @@ app.whenReady().then(() => {
   let currentPosition: { side: 'long' | 'short' | null; size: number; entryPrice: number; unrealizedPnl: number } = { side: null, size: 0, entryPrice: 0, unrealizedPnl: 0 }
   let lastKnownPrice = 0
   
+  // ═══════════════════════════════════════════════════════════════════
+  // PYRAMID STRATEGY STATE
+  // ═══════════════════════════════════════════════════════════════════
+  let pyramidState = {
+    level: 0,                    // Current pyramid level (0-5)
+    maxLevels: 5,                // Max pyramid levels
+    entries: [] as { price: number; size: number; timestamp: number }[],
+    avgEntry: 0,                 // Average entry price
+    totalSize: 0,                // Total position size
+    trailingStop: 0,             // Current trailing stop price
+    initialStop: 0,              // Initial stop-loss price
+    highestProfit: 0,            // Peak profit for trailing
+    lastAddTime: 0,              // Prevent rapid adds
+    ema9: 0,                     // EMA values for stop placement
+    ema21: 0,
+    ema50: 0,
+    ema200: 0,
+    priceHistory: [] as number[] // Recent prices for EMA calc
+  }
+  
+  // Pyramid config
+  const PYRAMID_CONFIG = {
+    minConfluenceToAdd: 4,       // Need 4+ confluence to add
+    minProfitToAdd: 0.15,        // Must be 0.15% in profit to add
+    addCooldownMs: 30000,        // 30 sec between adds
+    initialStopPercent: 0.8,     // 0.8% initial stop
+    trailingStopPercent: 0.5,    // 0.5% trailing from peak
+    takeProfitPercent: 2.0,      // 2% take profit
+    positionSizePerLevel: 0.15   // 15% of available per level
+  }
+  
+  // Calculate EMA
+  function calculateEMA(prices: number[], period: number): number {
+    if (prices.length < period) return prices[prices.length - 1] || 0
+    const k = 2 / (period + 1)
+    let ema = prices.slice(0, period).reduce((a, b) => a + b, 0) / period
+    for (let i = period; i < prices.length; i++) {
+      ema = prices[i] * k + ema * (1 - k)
+    }
+    return ema
+  }
+  
+  // Update EMAs with new price
+  function updateEMAs(price: number): void {
+    pyramidState.priceHistory.push(price)
+    // Keep last 250 prices for EMA200 calculation
+    if (pyramidState.priceHistory.length > 250) {
+      pyramidState.priceHistory.shift()
+    }
+    pyramidState.ema9 = calculateEMA(pyramidState.priceHistory, 9)
+    pyramidState.ema21 = calculateEMA(pyramidState.priceHistory, 21)
+    pyramidState.ema50 = calculateEMA(pyramidState.priceHistory, 50)
+    pyramidState.ema200 = calculateEMA(pyramidState.priceHistory, 200)
+  }
+  
+  // Calculate trailing stop based on EMAs
+  function calculateTrailingStop(side: 'long' | 'short', price: number): number {
+    const buffer = 0.001 // 0.1% buffer below/above EMA
+    
+    if (side === 'long') {
+      // For longs: stop under nearest EMA support
+      const ema9Stop = pyramidState.ema9 * (1 - buffer)
+      const ema21Stop = pyramidState.ema21 * (1 - buffer)
+      const ema50Stop = pyramidState.ema50 * (1 - buffer)
+      
+      // Use highest EMA that's below current price as stop
+      let stop = 0
+      if (pyramidState.ema9 < price && pyramidState.ema9 > stop) stop = ema9Stop
+      if (pyramidState.ema21 < price && pyramidState.ema21 > stop) stop = ema21Stop
+      if (pyramidState.ema50 < price && pyramidState.ema50 > stop) stop = ema50Stop
+      
+      // Fallback: percentage-based stop
+      if (stop === 0) stop = price * (1 - PYRAMID_CONFIG.initialStopPercent / 100)
+      
+      return stop
+    } else {
+      // For shorts: stop above nearest EMA resistance
+      const ema9Stop = pyramidState.ema9 * (1 + buffer)
+      const ema21Stop = pyramidState.ema21 * (1 + buffer)
+      const ema50Stop = pyramidState.ema50 * (1 + buffer)
+      
+      let stop = Infinity
+      if (pyramidState.ema9 > price && pyramidState.ema9 < stop) stop = ema9Stop
+      if (pyramidState.ema21 > price && pyramidState.ema21 < stop) stop = ema21Stop
+      if (pyramidState.ema50 > price && pyramidState.ema50 < stop) stop = ema50Stop
+      
+      if (stop === Infinity) stop = price * (1 + PYRAMID_CONFIG.initialStopPercent / 100)
+      
+      return stop
+    }
+  }
+  
+  // Reset pyramid state
+  function resetPyramid(): void {
+    pyramidState.level = 0
+    pyramidState.entries = []
+    pyramidState.avgEntry = 0
+    pyramidState.totalSize = 0
+    pyramidState.trailingStop = 0
+    pyramidState.initialStop = 0
+    pyramidState.highestProfit = 0
+    pyramidState.lastAddTime = 0
+  }
+  
   // Circuit breaker
   let circuitBreakerTripped = false
   let dailyLoss = 0
@@ -1463,8 +1567,12 @@ app.whenReady().then(() => {
           }
           
           // ═══════════════════════════════════════════════════════════════════
-          // PYRAMID EXIT LOGIC - Small losses, Big wins
+          // PYRAMID STRATEGY - Add on strength, trail stops under EMAs
           // ═══════════════════════════════════════════════════════════════════
+          
+          // Update EMAs with current price
+          updateEMAs(price)
+          
           if (currentPosition.side && currentPosition.entryPrice > 0) {
             const pnlPercent = currentPosition.side === 'long'
               ? ((price - currentPosition.entryPrice) / currentPosition.entryPrice) * 100
@@ -1472,88 +1580,144 @@ app.whenReady().then(() => {
             
             const pnlUsd = currentPosition.unrealizedPnl
             
-            // PYRAMID STRATEGY: Risk 1 to win 3+ (small losses, big wins)
-            // Stop-loss tighter, take-profit wider
-            const HARD_STOP_PERCENT = -0.8    // Hard stop: -0.8% price = ~70% loss at 88x
-            const SOFT_STOP_PERCENT = -0.4    // Soft stop: -0.4% only if confluence drops
-            const TAKE_PROFIT_1 = 0.5         // First target: +0.5% = ~44% gain
-            const TAKE_PROFIT_2 = 1.0         // Second target: +1.0% = ~88% gain
-            const TAKE_PROFIT_3 = 2.0         // Moon target: +2.0% = ~176% gain
+            // Sync pyramid state with actual position
+            if (pyramidState.level === 0 && currentPosition.size > 0) {
+              pyramidState.level = 1
+              pyramidState.entries = [{ price: currentPosition.entryPrice, size: currentPosition.size, timestamp: Date.now() }]
+              pyramidState.avgEntry = currentPosition.entryPrice
+              pyramidState.totalSize = currentPosition.size
+              pyramidState.initialStop = calculateTrailingStop(currentPosition.side, currentPosition.entryPrice)
+              pyramidState.trailingStop = pyramidState.initialStop
+            }
             
-            console.log(`[Trader] Position: ${currentPosition.side.toUpperCase()} | P&L: ${pnlPercent.toFixed(3)}% ($${pnlUsd.toFixed(2)}) | Confluence: ${confluenceScore}`)
+            // Update trailing stop - only move in profit direction
+            const newStop = calculateTrailingStop(currentPosition.side, price)
+            if (currentPosition.side === 'long' && newStop > pyramidState.trailingStop) {
+              pyramidState.trailingStop = newStop
+              console.log(`[Pyramid] Trailing stop raised to $${newStop.toFixed(2)} (under EMA)`)
+            } else if (currentPosition.side === 'short' && newStop < pyramidState.trailingStop) {
+              pyramidState.trailingStop = newStop
+              console.log(`[Pyramid] Trailing stop lowered to $${newStop.toFixed(2)} (above EMA)`)
+            }
+            
+            // Track peak profit for trailing
+            if (pnlPercent > pyramidState.highestProfit) {
+              pyramidState.highestProfit = pnlPercent
+            }
+            
+            console.log(`[Pyramid] Level ${pyramidState.level}/${pyramidState.maxLevels} | P&L: ${pnlPercent.toFixed(3)}% ($${pnlUsd.toFixed(2)}) | Stop: $${pyramidState.trailingStop.toFixed(2)} | EMAs: 9=${pyramidState.ema9.toFixed(2)} 21=${pyramidState.ema21.toFixed(2)} 50=${pyramidState.ema50.toFixed(2)}`)
             
             let shouldExit = false
-            let shouldDCA = false
+            let shouldAdd = false
             let exitReason = ''
             
-            // ═══ LOSS MANAGEMENT ═══
-            if (pnlPercent < 0) {
-              // HARD STOP - Always exit regardless of confluence
-              if (pnlPercent <= HARD_STOP_PERCENT) {
-                shouldExit = true
-                exitReason = `HARD STOP: ${pnlPercent.toFixed(2)}% exceeded -0.8% limit`
-              }
-              // SOFT STOP - Exit only if confluence has dropped (market turned against us)
-              else if (pnlPercent <= SOFT_STOP_PERCENT && confluenceScore < 4) {
-                shouldExit = true
-                exitReason = `SOFT STOP: ${pnlPercent.toFixed(2)}% with weak confluence (${confluenceScore})`
-              }
-              // DCA OPPORTUNITY - Price dipped but confluence still strong
-              else if (pnlPercent <= -0.2 && pnlPercent > SOFT_STOP_PERCENT && confluenceScore >= 5) {
-                // Only DCA if we haven't already and have enough balance
-                const dcaAmount = Math.min(lastKnownBalance.availableBalance * 0.15, 5)
-                if (dcaAmount >= 1 && currentPosition.size < 0.5) { // Max position limit
-                  shouldDCA = true
-                  console.log(`[Trader] DCA OPPORTUNITY: Confluence ${confluenceScore} still strong, adding $${dcaAmount.toFixed(2)}`)
-                }
-              }
-            }
+            // ═══ PYRAMID ADD-ON LOGIC ═══
+            const timeSinceLastAdd = Date.now() - pyramidState.lastAddTime
+            const canAdd = pyramidState.level < pyramidState.maxLevels && 
+                          timeSinceLastAdd > PYRAMID_CONFIG.addCooldownMs &&
+                          lastKnownBalance.availableBalance > 2
             
-            // ═══ PROFIT MANAGEMENT ═══
-            if (pnlPercent > 0) {
-              // Momentum reversal while in profit - take profits
-              if (priceTrend !== 'neutral') {
-                const isReversal = (currentPosition.side === 'long' && priceTrend === 'bearish') ||
-                                  (currentPosition.side === 'short' && priceTrend === 'bullish')
-                if (isReversal && pnlPercent >= 0.3) {
-                  shouldExit = true
-                  exitReason = `PROFIT PROTECT: +${pnlPercent.toFixed(2)}% with reversal signal`
-                }
-              }
+            if (canAdd && pnlPercent >= PYRAMID_CONFIG.minProfitToAdd && confluenceScore >= PYRAMID_CONFIG.minConfluenceToAdd) {
+              // Check for strong trend confirmation
+              const priceAboveEma9 = price > pyramidState.ema9
+              const priceAboveEma21 = price > pyramidState.ema21
+              const ema9AboveEma21 = pyramidState.ema9 > pyramidState.ema21
               
-              // Take profit at targets (scale out would be better but close all for now)
-              if (pnlPercent >= TAKE_PROFIT_2) {
-                shouldExit = true
-                exitReason = `TAKE PROFIT: +${pnlPercent.toFixed(2)}% hit TP2 target`
-              }
-              // Lower TP if confluence is dropping
-              else if (pnlPercent >= TAKE_PROFIT_1 && confluenceScore < 4) {
-                shouldExit = true
-                exitReason = `TAKE PROFIT: +${pnlPercent.toFixed(2)}% with declining confluence`
-              }
-            }
-            
-            // Execute DCA
-            if (shouldDCA && !shouldExit) {
-              const dcaAmount = Math.min(lastKnownBalance.availableBalance * 0.15, 5)
-              try {
-                console.log(`[Trader] ═══════════════════════════════════════════════`)
-                console.log(`[Trader] DCA: Adding $${dcaAmount.toFixed(2)} to ${currentPosition.side}`)
-                console.log(`[Trader] ═══════════════════════════════════════════════`)
-                await executeTrade(currentPosition.side, dcaAmount)
-              } catch (err: any) {
-                console.error(`[Trader] DCA failed:`, err.message)
+              // For longs: add when price above EMAs with stacked EMAs
+              // For shorts: add when price below EMAs with stacked EMAs
+              const trendConfirmed = currentPosition.side === 'long' 
+                ? (priceAboveEma9 && priceAboveEma21 && ema9AboveEma21)
+                : (!priceAboveEma9 && !priceAboveEma21 && !ema9AboveEma21)
+              
+              if (trendConfirmed) {
+                shouldAdd = true
+                console.log(`[Pyramid] ADD SIGNAL: Profit ${pnlPercent.toFixed(2)}% + Confluence ${confluenceScore} + EMAs aligned`)
               }
             }
             
-            // Execute Exit
+            // ═══ STOP-LOSS CHECK (EMA-based trailing) ═══
+            if (currentPosition.side === 'long' && price <= pyramidState.trailingStop) {
+              shouldExit = true
+              exitReason = `TRAILING STOP: Price $${price.toFixed(2)} hit stop $${pyramidState.trailingStop.toFixed(2)}`
+            } else if (currentPosition.side === 'short' && price >= pyramidState.trailingStop) {
+              shouldExit = true
+              exitReason = `TRAILING STOP: Price $${price.toFixed(2)} hit stop $${pyramidState.trailingStop.toFixed(2)}`
+            }
+            
+            // ═══ HARD STOP - Emergency exit ═══
+            if (pnlPercent <= -PYRAMID_CONFIG.initialStopPercent) {
+              shouldExit = true
+              exitReason = `HARD STOP: ${pnlPercent.toFixed(2)}% exceeded -${PYRAMID_CONFIG.initialStopPercent}% limit`
+            }
+            
+            // ═══ TAKE PROFIT ═══
+            if (pnlPercent >= PYRAMID_CONFIG.takeProfitPercent) {
+              shouldExit = true
+              exitReason = `TAKE PROFIT: +${pnlPercent.toFixed(2)}% hit ${PYRAMID_CONFIG.takeProfitPercent}% target`
+            }
+            
+            // ═══ PROFIT PROTECT on reversal ═══
+            if (pnlPercent > 0.5 && priceTrend !== 'neutral') {
+              const isReversal = (currentPosition.side === 'long' && priceTrend === 'bearish') ||
+                                (currentPosition.side === 'short' && priceTrend === 'bullish')
+              if (isReversal && confluenceScore < 4) {
+                shouldExit = true
+                exitReason = `PROFIT PROTECT: +${pnlPercent.toFixed(2)}% with reversal + weak confluence`
+              }
+            }
+            
+            // Execute ADD to pyramid
+            if (shouldAdd && !shouldExit) {
+              const addAmount = Math.min(
+                lastKnownBalance.availableBalance * PYRAMID_CONFIG.positionSizePerLevel,
+                10 // Cap at $10 per add
+              )
+              
+              if (addAmount >= 1) {
+                try {
+                  console.log(`[Pyramid] ═══════════════════════════════════════════════`)
+                  console.log(`[Pyramid] ADDING Level ${pyramidState.level + 1}: $${addAmount.toFixed(2)} to ${currentPosition.side}`)
+                  console.log(`[Pyramid] ═══════════════════════════════════════════════`)
+                  
+                  const result = await executeTrade(currentPosition.side, addAmount)
+                  if (result.success) {
+                    pyramidState.level++
+                    pyramidState.entries.push({ price, size: result.quantity || 0, timestamp: Date.now() })
+                    pyramidState.lastAddTime = Date.now()
+                    
+                    // Recalculate average entry
+                    const totalValue = pyramidState.entries.reduce((sum, e) => sum + (e.price * e.size), 0)
+                    const totalSize = pyramidState.entries.reduce((sum, e) => sum + e.size, 0)
+                    pyramidState.avgEntry = totalValue / totalSize
+                    pyramidState.totalSize = totalSize
+                    
+                    mainWindow?.webContents.send('trader:pyramidUpdate', {
+                      level: pyramidState.level,
+                      maxLevels: pyramidState.maxLevels,
+                      avgEntry: pyramidState.avgEntry,
+                      trailingStop: pyramidState.trailingStop,
+                      entries: pyramidState.entries,
+                      ema9: pyramidState.ema9,
+                      ema21: pyramidState.ema21,
+                      ema50: pyramidState.ema50
+                    })
+                  }
+                } catch (err: any) {
+                  console.error(`[Pyramid] Add failed:`, err.message)
+                }
+              }
+            }
+            
+            // Execute EXIT
             if (shouldExit) {
-              console.log(`[Trader] ═══════════════════════════════════════════════`)
-              console.log(`[Trader] EXIT: ${exitReason}`)
-              console.log(`[Trader] ═══════════════════════════════════════════════`)
+              console.log(`[Pyramid] ═══════════════════════════════════════════════`)
+              console.log(`[Pyramid] EXIT: ${exitReason}`)
+              console.log(`[Pyramid] Final Level: ${pyramidState.level} | Entries: ${pyramidState.entries.length}`)
+              console.log(`[Pyramid] ═══════════════════════════════════════════════`)
               
               try {
                 await closeAllPositions()
+                
                 mainWindow?.webContents.send('trader:trade', {
                   id: `exit-${Date.now()}`,
                   action: 'CLOSE',
@@ -1563,7 +1727,8 @@ app.whenReady().then(() => {
                   status: 'filled',
                   timestamp: Date.now(),
                   pnl: pnlUsd,
-                  reason: exitReason
+                  reason: exitReason,
+                  pyramidLevel: pyramidState.level
                 })
                 
                 // Track performance
@@ -1575,9 +1740,33 @@ app.whenReady().then(() => {
                   dailyLoss += Math.abs(pnlUsd)
                   if (pnlUsd < traderPerformance.largestLoss) traderPerformance.largestLoss = pnlUsd
                 }
+                
+                // Reset pyramid state
+                resetPyramid()
+                
               } catch (err: any) {
-                console.error(`[Trader] Exit failed:`, err.message)
+                console.error(`[Pyramid] Exit failed:`, err.message)
               }
+            }
+            
+            // Send pyramid state to UI every tick
+            mainWindow?.webContents.send('trader:pyramidUpdate', {
+              level: pyramidState.level,
+              maxLevels: pyramidState.maxLevels,
+              avgEntry: pyramidState.avgEntry,
+              trailingStop: pyramidState.trailingStop,
+              pnlPercent,
+              pnlUsd,
+              entries: pyramidState.entries,
+              ema9: pyramidState.ema9,
+              ema21: pyramidState.ema21,
+              ema50: pyramidState.ema50,
+              ema200: pyramidState.ema200
+            })
+          } else {
+            // No position - reset pyramid state
+            if (pyramidState.level > 0) {
+              resetPyramid()
             }
           }
           

@@ -488,6 +488,21 @@ export default function PyramidPage() {
   const [accountBalance, setAccountBalance] = useState<{ marginBalance: number; availableBalance: number; unrealizedPnl: number } | null>(null)
   const [apiRateLimits, setApiRateLimits] = useState<{ used: number; limit: number; resetIn: number }>({ used: 0, limit: 1200, resetIn: 60 })
   const [testTradeStatus, setTestTradeStatus] = useState<'idle' | 'buying' | 'selling' | 'done' | 'error'>('idle')
+  
+  // Live Pyramid State
+  const [livePyramid, setLivePyramid] = useState<{
+    level: number
+    maxLevels: number
+    avgEntry: number
+    trailingStop: number
+    pnlPercent: number
+    pnlUsd: number
+    entries: { price: number; size: number; timestamp: number }[]
+    ema9: number
+    ema21: number
+    ema50: number
+    ema200: number
+  } | null>(null)
 
   // Load API settings - check both localStorage AND saved keys on disk
   useEffect(() => {
@@ -595,6 +610,12 @@ export default function PyramidPage() {
         setLiveConfluence({ score: update.strength, factors })
       }
     })
+    
+    // Listen for pyramid state updates
+    const offPyramidUpdate = (window as any).pricePerfect.trader?.on('pyramidUpdate', (pyramid: any) => {
+      console.log('[PyramidPage] pyramidUpdate received:', pyramid)
+      setLivePyramid(pyramid)
+    })
 
     // Get initial status and backtest comparison
     ;(window as any).pricePerfect.trader?.getStatus().then((status: any) => {
@@ -619,6 +640,7 @@ export default function PyramidPage() {
       offBalance?.()
       offTrade?.()
       offLiveUpdate?.()
+      offPyramidUpdate?.()
     }
   }, [livePrice])
 
@@ -1189,6 +1211,86 @@ export default function PyramidPage() {
               )}
             </div>
           </div>
+
+          {/* Live Pyramid Status */}
+          {livePyramid && livePyramid.level > 0 && (
+            <div style={{ flex: '1 1 300px' }}>
+              <div style={{ fontSize: 10, color: '#6b7785', marginBottom: 8 }}>🔺 PYRAMID STATUS</div>
+              <div style={{ 
+                padding: 12, 
+                background: '#0d1a1a', 
+                borderRadius: 8,
+                border: '1px solid #a78bfa'
+              }}>
+                {/* Pyramid Level Indicator */}
+                <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                  {[1, 2, 3, 4, 5].map(level => (
+                    <div 
+                      key={level}
+                      style={{
+                        flex: 1,
+                        height: 8,
+                        borderRadius: 4,
+                        background: level <= livePyramid.level ? '#a78bfa' : '#2d3748',
+                        transition: 'background 0.3s'
+                      }}
+                    />
+                  ))}
+                </div>
+                <div style={{ fontSize: 12, color: '#a78bfa', fontWeight: 700, marginBottom: 4 }}>
+                  Level {livePyramid.level}/{livePyramid.maxLevels}
+                </div>
+                
+                {/* P&L Display */}
+                <div style={{ 
+                  fontSize: 20, 
+                  fontWeight: 700, 
+                  color: livePyramid.pnlPercent >= 0 ? '#4ade80' : '#fca5a5',
+                  marginBottom: 8
+                }}>
+                  {livePyramid.pnlPercent >= 0 ? '+' : ''}{livePyramid.pnlPercent?.toFixed(3)}%
+                  <span style={{ fontSize: 12, marginLeft: 8 }}>
+                    (${livePyramid.pnlUsd?.toFixed(2)})
+                  </span>
+                </div>
+
+                {/* Trailing Stop & EMAs */}
+                <div style={{ fontSize: 10, color: '#9aa4b2', lineHeight: 1.6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>🛑 Stop:</span>
+                    <span style={{ color: '#fca5a5', fontFamily: 'monospace' }}>${livePyramid.trailingStop?.toFixed(2)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>📊 Avg Entry:</span>
+                    <span style={{ fontFamily: 'monospace' }}>${livePyramid.avgEntry?.toFixed(2)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                    <span>EMAs:</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 9 }}>
+                      <span style={{ color: '#4ade80' }}>9: {livePyramid.ema9?.toFixed(0)}</span>
+                      {' '}
+                      <span style={{ color: '#60a5fa' }}>21: {livePyramid.ema21?.toFixed(0)}</span>
+                      {' '}
+                      <span style={{ color: '#f0b429' }}>50: {livePyramid.ema50?.toFixed(0)}</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Entry Breakdown */}
+                {livePyramid.entries && livePyramid.entries.length > 0 && (
+                  <div style={{ marginTop: 8, borderTop: '1px solid #2d3748', paddingTop: 8 }}>
+                    <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 4 }}>ENTRIES</div>
+                    {livePyramid.entries.map((entry, i) => (
+                      <div key={i} style={{ fontSize: 9, color: '#9aa4b2', display: 'flex', justifyContent: 'space-between' }}>
+                        <span>L{i + 1}: ${entry.price?.toFixed(2)}</span>
+                        <span>{entry.size?.toFixed(4)} ETH</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Trade Log */}
