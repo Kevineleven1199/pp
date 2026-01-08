@@ -157,6 +157,7 @@ contextBridge.exposeInMainWorld('pricePerfect', {
     getBacktestComparison: () => ipcRenderer.invoke('trader:getBacktestComparison'),
     getApiLimits: () => ipcRenderer.invoke('trader:getApiLimits'),
     getTradeHistory: () => ipcRenderer.invoke('trader:getTradeHistory'),
+    getSignalLog: () => ipcRenderer.invoke('trader:getSignalLog'),
     hasApiKeys: () => ipcRenderer.invoke('trader:hasApiKeys') as Promise<boolean>,
     saveApiKeys: (apiKey: string, apiSecret: string) => ipcRenderer.invoke('trader:saveApiKeys', { apiKey, apiSecret }),
     on: (event: string, callback: (payload: any) => void) => {

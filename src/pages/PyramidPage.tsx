@@ -503,6 +503,17 @@ export default function PyramidPage() {
     ema50: number
     ema200: number
   } | null>(null)
+  
+  // Signal Stats - tracks why trades did/didn't happen
+  const [signalStats, setSignalStats] = useState<{
+    totalSignals: number
+    signalsAboveThreshold: number
+    tradeAttempts: number
+    tradesExecuted: number
+    tradesFailed: number
+    blockedReasons: Record<string, number>
+  } | null>(null)
+  const [recentSignals, setRecentSignals] = useState<any[]>([])
 
   // Load API settings - check both localStorage AND saved keys on disk
   useEffect(() => {
@@ -669,6 +680,23 @@ export default function PyramidPage() {
         setTradeLogs(logs)
       }
     })
+    
+    // Load signal log and stats
+    ;(window as any).pricePerfect.trader?.getSignalLog().then((data: any) => {
+      if (data) {
+        console.log(`[PyramidPage] Loaded signal stats: ${data.stats?.totalSignals || 0} signals, ${data.stats?.tradesExecuted || 0} executed`)
+        setSignalStats(data.stats)
+        setRecentSignals(data.log || [])
+      }
+    }).catch(() => {})
+    
+    // Listen for live signal updates
+    const offSignalLog = (window as any).pricePerfect.trader?.on('signalLog', (data: any) => {
+      if (data?.stats) setSignalStats(data.stats)
+      if (data?.signal) {
+        setRecentSignals(prev => [data.signal, ...prev.slice(0, 49)])
+      }
+    })
 
     return () => {
       offHealth?.()
@@ -677,6 +705,7 @@ export default function PyramidPage() {
       offLiveUpdate?.()
       offPyramidUpdate?.()
       offHistoryUpdate?.()
+      offSignalLog?.()
     }
   }, [livePrice])
 
@@ -1441,6 +1470,84 @@ export default function PyramidPage() {
           </div>
         )}
       </div>
+
+      {/* Signal Stats Panel - Shows why trades did/didn't happen */}
+      {signalStats && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e2636', background: '#0f1318' }}>
+          <div style={{ fontSize: 11, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
+            📡 Signal Analysis
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8 }}>
+            <div style={{ padding: 8, background: '#111820', borderRadius: 6, textAlign: 'center' }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>SIGNALS</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#9aa4b2' }}>{signalStats.signalsAboveThreshold}</div>
+              <div style={{ fontSize: 9, color: '#6b7785' }}>≥ threshold</div>
+            </div>
+            <div style={{ padding: 8, background: '#111820', borderRadius: 6, textAlign: 'center' }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>ATTEMPTS</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#60a5fa' }}>{signalStats.tradeAttempts}</div>
+            </div>
+            <div style={{ padding: 8, background: '#0a1a0f', borderRadius: 6, textAlign: 'center', border: '1px solid #22c55e' }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>EXECUTED</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#4ade80' }}>{signalStats.tradesExecuted}</div>
+            </div>
+            <div style={{ padding: 8, background: '#1a0f0f', borderRadius: 6, textAlign: 'center', border: '1px solid #ef4444' }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>FAILED</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#fca5a5' }}>{signalStats.tradesFailed}</div>
+            </div>
+            <div style={{ padding: 8, background: '#111820', borderRadius: 6, textAlign: 'center' }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 2 }}>EXEC RATE</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: signalStats.signalsAboveThreshold > 0 ? '#4ade80' : '#6b7785' }}>
+                {signalStats.signalsAboveThreshold > 0 
+                  ? `${((signalStats.tradesExecuted / signalStats.signalsAboveThreshold) * 100).toFixed(0)}%`
+                  : '—'}
+              </div>
+            </div>
+          </div>
+          
+          {/* Blocked Reasons */}
+          {Object.keys(signalStats.blockedReasons || {}).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 4 }}>BLOCKED REASONS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {Object.entries(signalStats.blockedReasons).map(([reason, count]) => (
+                  <span key={reason} style={{ 
+                    padding: '2px 6px', 
+                    background: '#1a1a2e', 
+                    borderRadius: 4, 
+                    fontSize: 9, 
+                    color: '#f59e0b'
+                  }}>
+                    {reason}: {count as number}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {/* Recent Blocked Signals */}
+          {recentSignals.filter(s => s.action === 'BLOCKED').slice(0, 3).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 4 }}>RECENT BLOCKED (conf ≥ threshold)</div>
+              {recentSignals.filter(s => s.action === 'BLOCKED').slice(0, 3).map((sig, i) => (
+                <div key={i} style={{ 
+                  fontSize: 9, 
+                  color: '#9aa4b2', 
+                  padding: '3px 6px',
+                  background: '#0d1219',
+                  borderRadius: 3,
+                  marginBottom: 2,
+                  display: 'flex',
+                  justifyContent: 'space-between'
+                }}>
+                  <span style={{ color: '#f59e0b' }}>⚠️ {sig.blockReason}</span>
+                  <span>Conf: {sig.confluenceScore} | ${sig.price?.toFixed(2)} | {new Date(sig.timestamp).toLocaleTimeString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 24/7 Monitoring Panel */}
       {showMonitor && liveTrading && (

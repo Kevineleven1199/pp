@@ -612,6 +612,109 @@ app.whenReady().then(() => {
   tradeHistory = loadTradeHistory()
   persistedPerformance = loadPerformance()
   
+  // ═══════════════════════════════════════════════════════════════════
+  // SIGNAL LOG - Track every opportunity and why trades did/didn't happen
+  // ═══════════════════════════════════════════════════════════════════
+  const signalLogFile = path.join(traderDataDir, 'signal-log.json')
+  
+  interface SignalRecord {
+    id: string
+    timestamp: number
+    price: number
+    confluenceScore: number
+    confluenceFactors: string[]
+    minConfluenceRequired: number
+    hasPosition: boolean
+    positionSide?: string
+    circuitBreakerTripped: boolean
+    autoTradingEnabled: boolean
+    hasApiKeys: boolean
+    availableBalance: number
+    action: 'SIGNAL_ONLY' | 'TRADE_ATTEMPTED' | 'TRADE_EXECUTED' | 'TRADE_FAILED' | 'BLOCKED'
+    blockReason?: string
+    tradeResult?: string
+  }
+  
+  interface SignalStats {
+    totalSignals: number
+    signalsAboveThreshold: number
+    tradeAttempts: number
+    tradesExecuted: number
+    tradesFailed: number
+    blockedReasons: Record<string, number>
+    lastUpdated: number
+  }
+  
+  let signalLog: SignalRecord[] = []
+  let signalStats: SignalStats = {
+    totalSignals: 0,
+    signalsAboveThreshold: 0,
+    tradeAttempts: 0,
+    tradesExecuted: 0,
+    tradesFailed: 0,
+    blockedReasons: {},
+    lastUpdated: Date.now()
+  }
+  
+  function loadSignalLog(): { log: SignalRecord[], stats: SignalStats } {
+    try {
+      if (fs.existsSync(signalLogFile)) {
+        const data = fs.readFileSync(signalLogFile, 'utf-8')
+        const parsed = JSON.parse(data)
+        console.log(`[Trader] Loaded signal log: ${parsed.log?.length || 0} signals, ${parsed.stats?.tradesExecuted || 0} executed`)
+        return { log: parsed.log || [], stats: parsed.stats || signalStats }
+      }
+    } catch (err) {
+      console.error('[Trader] Failed to load signal log:', err)
+    }
+    return { log: [], stats: signalStats }
+  }
+  
+  function saveSignalLog(): void {
+    try {
+      // Keep last 500 signals
+      if (signalLog.length > 500) {
+        signalLog = signalLog.slice(0, 500)
+      }
+      signalStats.lastUpdated = Date.now()
+      fs.writeFileSync(signalLogFile, JSON.stringify({ log: signalLog, stats: signalStats }, null, 2), 'utf-8')
+    } catch (err) {
+      console.error('[Trader] Failed to save signal log:', err)
+    }
+  }
+  
+  function recordSignal(signal: SignalRecord): void {
+    signalLog.unshift(signal)
+    signalStats.totalSignals++
+    
+    if (signal.confluenceScore >= signal.minConfluenceRequired) {
+      signalStats.signalsAboveThreshold++
+    }
+    
+    if (signal.action === 'TRADE_ATTEMPTED') {
+      signalStats.tradeAttempts++
+    } else if (signal.action === 'TRADE_EXECUTED') {
+      signalStats.tradesExecuted++
+    } else if (signal.action === 'TRADE_FAILED') {
+      signalStats.tradesFailed++
+    } else if (signal.action === 'BLOCKED' && signal.blockReason) {
+      signalStats.blockedReasons[signal.blockReason] = (signalStats.blockedReasons[signal.blockReason] || 0) + 1
+    }
+    
+    // Save every 10 signals to reduce disk writes
+    if (signalStats.totalSignals % 10 === 0) {
+      saveSignalLog()
+    }
+    
+    // Send to UI
+    mainWindow?.webContents.send('trader:signalLog', { signal, stats: signalStats })
+  }
+  
+  // Load signal log on init
+  const loadedSignals = loadSignalLog()
+  signalLog = loadedSignals.log
+  signalStats = loadedSignals.stats
+  
   // Core state
   let traderStartTime = 0
   let traderRunning = false
@@ -1460,6 +1563,11 @@ app.whenReady().then(() => {
   ipcMain.handle('trader:getTradeHistory', async () => {
     return tradeHistory
   })
+  
+  // Get signal log and stats
+  ipcMain.handle('trader:getSignalLog', async () => {
+    return { log: signalLog.slice(0, 50), stats: signalStats }
+  })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets
   ipcMain.handle('trader:hasApiKeys', async () => {
@@ -1673,18 +1781,51 @@ app.whenReady().then(() => {
           
           console.log(`[Trader] Live confluence: ${confluenceScore}/${traderConfig.minConfluenceToEnter} [${confluenceFactors.join(', ')}]`)
           
-          // AUTO-TRADING LOGIC
+          // AUTO-TRADING LOGIC with detailed signal logging
           const minConf = traderConfig.minConfluenceToEnter
           const enableAuto = traderConfig.enableAutoTrading
           
+          // Build signal record for every check
+          const baseSignal: SignalRecord = {
+            id: `sig-${Date.now()}`,
+            timestamp: Date.now(),
+            price,
+            confluenceScore,
+            confluenceFactors,
+            minConfluenceRequired: minConf,
+            hasPosition: !!currentPosition.side,
+            positionSide: currentPosition.side || undefined,
+            circuitBreakerTripped,
+            autoTradingEnabled: enableAuto,
+            hasApiKeys: !!traderApiKey,
+            availableBalance: lastKnownBalance.availableBalance,
+            action: 'SIGNAL_ONLY'
+          }
+          
           console.log(`[Trader] Auto-trade check: conf=${confluenceScore}>=${minConf}? pos=${currentPosition.side} circuit=${circuitBreakerTripped} auto=${enableAuto}`)
           
-          if (enableAuto && confluenceScore >= minConf && !currentPosition.side && !circuitBreakerTripped && traderApiKey) {
+          // Determine why trade might be blocked
+          let blockReason: string | null = null
+          if (!enableAuto) blockReason = 'Auto-trading disabled'
+          else if (confluenceScore < minConf) blockReason = `Confluence ${confluenceScore} < ${minConf} required`
+          else if (currentPosition.side) blockReason = `Already in ${currentPosition.side} position`
+          else if (circuitBreakerTripped) blockReason = 'Circuit breaker tripped'
+          else if (!traderApiKey) blockReason = 'No API keys configured'
+          else if (lastKnownBalance.availableBalance < 1) blockReason = 'Insufficient balance'
+          
+          if (blockReason) {
+            // Log blocked signal only if confluence was good enough (to avoid spam)
+            if (confluenceScore >= minConf) {
+              baseSignal.action = 'BLOCKED'
+              baseSignal.blockReason = blockReason
+              recordSignal(baseSignal)
+              console.log(`[Trader] ⚠️ BLOCKED: ${blockReason} (conf=${confluenceScore})`)
+            }
+          } else {
+            // All conditions met - attempt trade
             const tradeSide: 'long' | 'short' = priceTrend === 'bearish' ? 'short' : 'long'
-            // baseRiskPercent is already a percentage (0.3 = 0.3%), so multiply by balance directly
-            // For $21 balance with 0.3% = $0.06, too small. Use minimum $5 or 25% of balance
             const riskAmount = lastKnownBalance.availableBalance * Math.max(traderConfig.baseRiskPercent, 25) / 100
-            const marginUsd = Math.min(riskAmount, lastKnownBalance.availableBalance * 0.5, 10) // Cap at $10 for safety
+            const marginUsd = Math.min(riskAmount, lastKnownBalance.availableBalance * 0.5, 10)
             
             console.log(`[Trader] Position sizing: balance=$${lastKnownBalance.availableBalance.toFixed(2)} risk%=${traderConfig.baseRiskPercent} margin=$${marginUsd.toFixed(2)}`)
             
@@ -1693,27 +1834,48 @@ app.whenReady().then(() => {
               console.log(`[Trader] AUTO ENTRY: ${tradeSide.toUpperCase()} $${marginUsd.toFixed(2)} @ confluence ${confluenceScore}`)
               console.log(`[Trader] ═══════════════════════════════════════════════`)
               
+              baseSignal.action = 'TRADE_ATTEMPTED'
+              
               try {
                 const result = await executeTrade(tradeSide, marginUsd)
                 if (result.success) {
-                  mainWindow?.webContents.send('trader:trade', {
+                  baseSignal.action = 'TRADE_EXECUTED'
+                  baseSignal.tradeResult = `${tradeSide.toUpperCase()} ${result.quantity} @ $${result.price}`
+                  recordSignal(baseSignal)
+                  
+                  // Record the actual trade
+                  const tradeRecord: TradeRecord = {
                     id: `auto-${Date.now()}`,
+                    timestamp: Date.now(),
                     action: tradeSide === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
                     side: tradeSide,
+                    price: result.price || price,
+                    quantity: result.quantity || 0,
                     marginUsd,
-                    price,
-                    quantity: result.quantity,
-                    status: 'filled',
-                    timestamp: Date.now(),
-                    confluence: confluenceScore,
-                    factors: confluenceFactors
-                  })
+                    pnl: 0,
+                    fees: (result.notional || marginUsd * 88) * 0.0006,
+                    confluenceScore
+                  }
+                  recordTrade(tradeRecord)
+                  
+                  mainWindow?.webContents.send('trader:trade', tradeRecord)
                   traderPerformance.totalTrades++
+                } else {
+                  baseSignal.action = 'TRADE_FAILED'
+                  baseSignal.tradeResult = result.error || 'Unknown error'
+                  recordSignal(baseSignal)
                 }
               } catch (err: any) {
+                baseSignal.action = 'TRADE_FAILED'
+                baseSignal.tradeResult = err.message
+                recordSignal(baseSignal)
                 console.error(`[Trader] Auto entry failed:`, err.message)
                 consecutiveErrors++
               }
+            } else {
+              baseSignal.action = 'BLOCKED'
+              baseSignal.blockReason = `Margin too small: $${marginUsd.toFixed(2)} < $1`
+              recordSignal(baseSignal)
             }
           }
           
