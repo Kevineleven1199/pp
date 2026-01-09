@@ -2621,6 +2621,15 @@ Respond in JSON:
             availableBalance: lastKnownBalance.availableBalance,
             blockReason: `SmartEntry: ${reentryCheck.reason}`
           })
+          
+          // Telegram notification for blocked attempt
+          sendTelegramNotification('attempt',
+            `⛔ *TRADE BLOCKED*\n\n` +
+            `📊 ${tradeSide.toUpperCase()} ETHUSDT @ $${price.toFixed(2)}\n` +
+            `🎯 Confluence: ${confluenceScore}/5\n` +
+            `📝 Reason: ${reentryCheck.reason}\n` +
+            `⏰ ${new Date().toLocaleTimeString()}`
+          )
           // Skip this trade attempt
         } else {
           // Calculate position size: use minimum 25% for small accounts, cap at $10 for safety
@@ -2651,6 +2660,17 @@ Respond in JSON:
                   confluence: confluenceScore
                 })
                 traderPerformance.totalTrades++
+                
+                // Telegram notification for trade execution
+                sendTelegramNotification('trade', 
+                  `🚀 *TRADE OPENED*\n\n` +
+                  `📊 *${tradeSide.toUpperCase()}* ETHUSDT\n` +
+                  `💰 Entry: $${price.toFixed(2)}\n` +
+                  `📏 Size: ${result.quantity} ETH\n` +
+                  `💵 Margin: $${marginUsd.toFixed(2)}\n` +
+                  `🎯 Confluence: ${confluenceScore}/5\n` +
+                  `⏰ ${new Date().toLocaleTimeString()}`
+                )
               }
             } catch (err: any) {
               console.error(`[Trader] Auto entry failed:`, err.message)
@@ -2672,6 +2692,7 @@ Respond in JSON:
           console.log(`[Trader] ═══════════════════════════════════════════════`)
           
           try {
+            const exitPnl = currentPosition.unrealizedPnl
             await closeAllPositions()
             mainWindow?.webContents.send('trader:trade', {
               id: `exit-${Date.now()}`,
@@ -2684,6 +2705,15 @@ Respond in JSON:
               timestamp: Date.now(),
               reason: 'Momentum Reversal'
             })
+            
+            // Telegram notification for exit
+            sendTelegramNotification('exit',
+              `🔔 *POSITION CLOSED*\n\n` +
+              `📊 Exit Price: $${price.toFixed(2)}\n` +
+              `${exitPnl >= 0 ? '✅' : '❌'} P&L: ${exitPnl >= 0 ? '+' : ''}$${exitPnl.toFixed(2)}\n` +
+              `📝 Reason: Momentum Reversal\n` +
+              `⏰ ${new Date().toLocaleTimeString()}`
+            )
           } catch (err: any) {
             console.error(`[Trader] Auto exit failed:`, err.message)
           }
@@ -2969,6 +2999,69 @@ Respond in JSON:
     }
     return { success: false, error: 'Invalid keys' }
   })
+
+  // ═══════════════════════════════════════════════════════════════════
+  // TELEGRAM NOTIFICATIONS
+  // ═══════════════════════════════════════════════════════════════════
+  let telegramSettings = {
+    botToken: '',
+    chatId: '',
+    enabled: false,
+    notifyTrades: true,
+    notifyAttempts: false,
+    notifyExits: true,
+    notifyPnL: true
+  }
+
+  // Load telegram settings on startup
+  const telegramSettingsFile = path.join(traderDataDir, 'telegram-settings.json')
+  try {
+    if (fs.existsSync(telegramSettingsFile)) {
+      telegramSettings = JSON.parse(fs.readFileSync(telegramSettingsFile, 'utf-8'))
+      console.log('[Telegram] Settings loaded')
+    }
+  } catch (err) {
+    console.log('[Telegram] No saved settings found')
+  }
+
+  // Save telegram settings
+  ipcMain.handle('trader:saveTelegramSettings', async (_event, settings: typeof telegramSettings) => {
+    telegramSettings = settings
+    fs.writeFileSync(telegramSettingsFile, JSON.stringify(settings, null, 2))
+    console.log('[Telegram] Settings saved:', settings.enabled ? 'ENABLED' : 'disabled')
+    return { success: true }
+  })
+
+  // Send telegram notification
+  async function sendTelegramNotification(type: 'trade' | 'exit' | 'attempt' | 'pnl', message: string): Promise<void> {
+    if (!telegramSettings.enabled || !telegramSettings.botToken || !telegramSettings.chatId) {
+      return
+    }
+
+    // Check if this notification type is enabled
+    if (type === 'trade' && !telegramSettings.notifyTrades) return
+    if (type === 'exit' && !telegramSettings.notifyExits) return
+    if (type === 'attempt' && !telegramSettings.notifyAttempts) return
+    if (type === 'pnl' && !telegramSettings.notifyPnL) return
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${telegramSettings.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: telegramSettings.chatId,
+          text: message,
+          parse_mode: 'Markdown'
+        })
+      })
+      
+      if (!response.ok) {
+        console.error('[Telegram] Failed to send notification:', await response.text())
+      }
+    } catch (err: any) {
+      console.error('[Telegram] Error:', err.message)
+    }
+  }
 
   // Track API calls for rate limiting display
   let apiCallCount = 0
@@ -3514,6 +3607,19 @@ Respond in JSON:
                 recordTrade(exitRecord)
                 
                 mainWindow?.webContents.send('trader:trade', exitRecord)
+                
+                // Telegram notification for pyramid exit
+                const netPnl = pnlUsd - totalFees
+                sendTelegramNotification('exit',
+                  `${netPnl >= 0 ? '✅' : '❌'} *POSITION CLOSED*\n\n` +
+                  `📊 ETHUSDT ${currentPosition.side?.toUpperCase()}\n` +
+                  `💰 Exit: $${price.toFixed(2)}\n` +
+                  `📈 P&L: ${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)\n` +
+                  `💸 Fees: $${totalFees.toFixed(2)}\n` +
+                  `📝 ${exitReason}\n` +
+                  `🏔 Pyramid Level: ${pyramidState.level}\n` +
+                  `⏰ ${new Date().toLocaleTimeString()}`
+                )
                 
                 // Track session performance (persisted performance updated in recordTrade)
                 traderPerformance.totalPnl += pnlUsd

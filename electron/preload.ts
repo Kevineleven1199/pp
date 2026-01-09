@@ -161,6 +161,7 @@ contextBridge.exposeInMainWorld('pricePerfect', {
     getMarketJournal: () => ipcRenderer.invoke('trader:getMarketJournal'),
     hasApiKeys: () => ipcRenderer.invoke('trader:hasApiKeys') as Promise<boolean>,
     saveApiKeys: (apiKey: string, apiSecret: string) => ipcRenderer.invoke('trader:saveApiKeys', { apiKey, apiSecret }),
+    saveTelegramSettings: (settings: { botToken: string; chatId: string; enabled: boolean; notifyTrades: boolean; notifyAttempts: boolean; notifyExits: boolean; notifyPnL: boolean }) => ipcRenderer.invoke('trader:saveTelegramSettings', settings),
     on: (event: string, callback: (payload: any) => void) => {
       const channel = `trader:${event}`
       const listener = (_: unknown, payload: any) => callback(payload)

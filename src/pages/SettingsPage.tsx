@@ -10,6 +10,13 @@ type ApiSettings = {
   asterDexTestnet: boolean
   pyramidAutoTrade: boolean
   pyramidMaxPositionUsd: number
+  telegramBotToken: string
+  telegramChatId: string
+  telegramEnabled: boolean
+  telegramNotifyTrades: boolean
+  telegramNotifyAttempts: boolean
+  telegramNotifyExits: boolean
+  telegramNotifyPnL: boolean
 }
 
 const DEFAULT_SETTINGS: ApiSettings = {
@@ -21,7 +28,14 @@ const DEFAULT_SETTINGS: ApiSettings = {
   asterDexApiSecret: '',
   asterDexTestnet: true,
   pyramidAutoTrade: false,
-  pyramidMaxPositionUsd: 100
+  pyramidMaxPositionUsd: 100,
+  telegramBotToken: '',
+  telegramChatId: '',
+  telegramEnabled: false,
+  telegramNotifyTrades: true,
+  telegramNotifyAttempts: false,
+  telegramNotifyExits: true,
+  telegramNotifyPnL: true
 }
 
 const OPENROUTER_MODELS = [
@@ -46,6 +60,8 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false)
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testMessage, setTestMessage] = useState('')
+  const [telegramTestStatus, setTelegramTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
+  const [telegramTestMessage, setTelegramTestMessage] = useState('')
 
   useEffect(() => {
     // Load settings from localStorage on mount
@@ -93,6 +109,51 @@ export default function SettingsPage() {
     } catch (e) {
       setTestStatus('error')
       setTestMessage(`✗ Network error: ${e instanceof Error ? e.message : 'Unknown error'}`)
+    }
+  }
+
+  const testTelegramConnection = async () => {
+    if (!settings.telegramBotToken || !settings.telegramChatId) {
+      setTelegramTestStatus('error')
+      setTelegramTestMessage('Please enter both Bot Token and Chat ID')
+      return
+    }
+
+    setTelegramTestStatus('testing')
+    setTelegramTestMessage('Sending test message...')
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: settings.telegramChatId,
+          text: '✅ *Price Perfect Connected!*\n\nTelegram notifications are now active.\n\n📊 You will receive alerts for:\n• Trade executions\n• Position exits\n• P&L updates',
+          parse_mode: 'Markdown'
+        })
+      })
+
+      const data = await response.json()
+      if (data.ok) {
+        setTelegramTestStatus('success')
+        setTelegramTestMessage('✓ Test message sent! Check your Telegram.')
+        // Save telegram settings to backend
+        await (window as any).pricePerfect.trader?.saveTelegramSettings({
+          botToken: settings.telegramBotToken,
+          chatId: settings.telegramChatId,
+          enabled: settings.telegramEnabled,
+          notifyTrades: settings.telegramNotifyTrades,
+          notifyAttempts: settings.telegramNotifyAttempts,
+          notifyExits: settings.telegramNotifyExits,
+          notifyPnL: settings.telegramNotifyPnL
+        })
+      } else {
+        setTelegramTestStatus('error')
+        setTelegramTestMessage(`✗ Error: ${data.description || 'Invalid token or chat ID'}`)
+      }
+    } catch (e) {
+      setTelegramTestStatus('error')
+      setTelegramTestMessage(`✗ Network error: ${e instanceof Error ? e.message : 'Unknown error'}`)
     }
   }
 
@@ -362,6 +423,159 @@ export default function SettingsPage() {
                 fontSize: 14
               }}
             />
+          </div>
+        </div>
+
+        {/* Telegram Notifications Section */}
+        <div style={{ 
+          background: '#0d1219', 
+          borderRadius: 12, 
+          padding: 20, 
+          border: settings.telegramEnabled ? '2px solid #0ea5e9' : '1px solid #1e2636',
+          marginBottom: 20
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+            <span style={{ fontSize: 20 }}>📱</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Telegram Notifications</div>
+              <div style={{ fontSize: 12, color: '#6b7785' }}>Get real-time trade alerts on your phone</div>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={settings.telegramEnabled}
+                onChange={(e) => setSettings(s => ({ ...s, telegramEnabled: e.target.checked }))}
+                style={{ width: 18, height: 18, accentColor: '#0ea5e9' }}
+              />
+              <span style={{ fontSize: 12, color: settings.telegramEnabled ? '#0ea5e9' : '#6b7785' }}>
+                {settings.telegramEnabled ? 'Enabled' : 'Disabled'}
+              </span>
+            </label>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, color: '#9aa4b2', marginBottom: 6 }}>
+              Bot Token
+            </label>
+            <input
+              type="password"
+              value={settings.telegramBotToken}
+              onChange={(e) => setSettings(s => ({ ...s, telegramBotToken: e.target.value }))}
+              placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid #1e2636',
+                background: '#111820',
+                color: '#e6eaf2',
+                fontSize: 14
+              }}
+            />
+            <div style={{ fontSize: 11, color: '#6b7785', marginTop: 4 }}>
+              Create a bot via <a href="https://t.me/BotFather" target="_blank" rel="noopener" style={{ color: '#60a5fa' }}>@BotFather</a> on Telegram
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: 'block', fontSize: 12, color: '#9aa4b2', marginBottom: 6 }}>
+              Chat ID
+            </label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                type="text"
+                value={settings.telegramChatId}
+                onChange={(e) => setSettings(s => ({ ...s, telegramChatId: e.target.value }))}
+                placeholder="Your chat ID (e.g., 123456789)"
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid #1e2636',
+                  background: '#111820',
+                  color: '#e6eaf2',
+                  fontSize: 14
+                }}
+              />
+              <button
+                onClick={testTelegramConnection}
+                disabled={telegramTestStatus === 'testing'}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: 8,
+                  border: '1px solid #0ea5e9',
+                  background: telegramTestStatus === 'testing' ? '#1e2636' : '#0c4a6e',
+                  color: '#38bdf8',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: telegramTestStatus === 'testing' ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {telegramTestStatus === 'testing' ? 'Sending...' : 'Test'}
+              </button>
+            </div>
+            {telegramTestMessage && (
+              <div style={{ 
+                fontSize: 12, 
+                marginTop: 8, 
+                color: telegramTestStatus === 'success' ? '#4ade80' : telegramTestStatus === 'error' ? '#f87171' : '#9aa4b2'
+              }}>
+                {telegramTestMessage}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: '#6b7785', marginTop: 4 }}>
+              Get your Chat ID from <a href="https://t.me/userinfobot" target="_blank" rel="noopener" style={{ color: '#60a5fa' }}>@userinfobot</a> on Telegram
+            </div>
+          </div>
+
+          {/* Notification Options */}
+          <div style={{ 
+            padding: 12, 
+            background: '#111820', 
+            borderRadius: 8,
+            border: '1px solid #1e2636'
+          }}>
+            <div style={{ fontSize: 12, color: '#9aa4b2', marginBottom: 10, fontWeight: 600 }}>
+              Notification Types
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={settings.telegramNotifyTrades}
+                  onChange={(e) => setSettings(s => ({ ...s, telegramNotifyTrades: e.target.checked }))}
+                  style={{ accentColor: '#0ea5e9' }}
+                />
+                <span style={{ fontSize: 12, color: '#e6eaf2' }}>Trade Executions</span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={settings.telegramNotifyExits}
+                  onChange={(e) => setSettings(s => ({ ...s, telegramNotifyExits: e.target.checked }))}
+                  style={{ accentColor: '#0ea5e9' }}
+                />
+                <span style={{ fontSize: 12, color: '#e6eaf2' }}>Position Exits</span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={settings.telegramNotifyAttempts}
+                  onChange={(e) => setSettings(s => ({ ...s, telegramNotifyAttempts: e.target.checked }))}
+                  style={{ accentColor: '#0ea5e9' }}
+                />
+                <span style={{ fontSize: 12, color: '#e6eaf2' }}>Trade Attempts</span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={settings.telegramNotifyPnL}
+                  onChange={(e) => setSettings(s => ({ ...s, telegramNotifyPnL: e.target.checked }))}
+                  style={{ accentColor: '#0ea5e9' }}
+                />
+                <span style={{ fontSize: 12, color: '#e6eaf2' }}>P&L Updates</span>
+              </label>
+            </div>
           </div>
         </div>
 
