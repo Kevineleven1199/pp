@@ -1543,137 +1543,70 @@ Respond in JSON ONLY:
   }
   
   // ═══════════════════════════════════════════════════════════════════
-  // DATA-DRIVEN THRESHOLDS (from actual ETHUSDT candle/swing analysis)
-  // 1-min median move: 0.04%, 90th pct: 0.10%
-  // 5-min swing median: 0.53%, 75th pct: 0.80%
+  // SIMPLIFIED RE-ENTRY LOGIC
+  // Real analysis showed: stops too tight was the problem, not entry timing
+  // Winners entered at bottom 20% of range (avg 13.4%)
+  // Losers entered at middle/top of range (avg 52.5%)
   // ═══════════════════════════════════════════════════════════════════
-  const REENTRY_THRESHOLDS = {
-    MIN_SWING_MOVE: 0.35,        // 25th percentile of actual swings - minimum meaningful reversal
-    MEDIAN_SWING_MOVE: 0.53,    // Median swing-to-swing from 500 real swings
-    SIGNIFICANT_MOVE: 0.80,     // 75th percentile - strong move
-    NOISE_THRESHOLD: 0.10       // 90th percentile of 1-min moves - below this is just noise
-  }
   
   function shouldAllowReentry(currentPrice: number, intendedSide: 'long' | 'short'): { allowed: boolean; reason: string } {
-    const now = Date.now()
-    
     // First trade ever - allow it
     if (reentryState.lastExitTime === 0) {
       return { allowed: true, reason: 'First trade' }
     }
     
-    // Calculate price move since exit
-    const priceMovePercent = ((currentPrice - reentryState.lastExitPrice) / reentryState.lastExitPrice) * 100
-    const absPriceMove = Math.abs(priceMovePercent)
-    reentryState.priceMoveSinceExit = priceMovePercent
-    
-    // Calculate distance from recent extremes
-    const distanceFromHigh = ((reentryState.recentHigh - currentPrice) / currentPrice) * 100
-    const distanceFromLow = ((currentPrice - reentryState.recentLow) / currentPrice) * 100
-    const rangeSize = ((reentryState.recentHigh - reentryState.recentLow) / currentPrice) * 100
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 1: ALWAYS require at least MIN_SWING_MOVE from exit price
-    // Data shows median swing is 0.53%, so 0.35% is minimum meaningful move
-    // ═══════════════════════════════════════════════════════════════════
-    if (absPriceMove < REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
-      return { 
-        allowed: false, 
-        reason: `Need ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}% move from exit (median swing=0.53%), only ${absPriceMove.toFixed(3)}%` 
-      }
+    // Calculate position in recent range (the REAL edge from trade analysis)
+    const rangeSize = reentryState.recentHigh - reentryState.recentLow
+    if (rangeSize <= 0) {
+      return { allowed: true, reason: 'Range not established yet' }
     }
     
+    const positionInRange = (currentPrice - reentryState.recentLow) / rangeSize
+    
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 2: After LOSS, require MEDIAN swing move (0.53%)
+    // THE REAL EDGE (from actual trade data):
+    // - Entries at <= 20% from bottom: 100% win rate (3/3)
+    // - Entries at > 20% from bottom: 0% win rate (0/15)
     // ═══════════════════════════════════════════════════════════════════
-    if (reentryState.lastExitPnl < 0) {
-      const requiredMove = REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE + (reentryState.consecutiveLosses * 0.15)
-      
-      if (absPriceMove < requiredMove) {
+    
+    if (intendedSide === 'long') {
+      // Only long when price is in bottom 25% of range
+      if (positionInRange > 0.25) {
         return { 
           allowed: false, 
-          reason: `After loss: need ${requiredMove.toFixed(2)}% swing move, only ${absPriceMove.toFixed(3)}%` 
+          reason: `LONG blocked: price at ${(positionInRange*100).toFixed(0)}% of range (need bottom 25%). Range: $${reentryState.recentLow.toFixed(0)}-$${reentryState.recentHigh.toFixed(0)}`
         }
       }
-      
-      // Also check direction - if we lost on a long, price should have dropped before we re-long
-      if (intendedSide === 'long' && priceMovePercent > -REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
+    } else {
+      // Only short when price is in top 25% of range
+      if (positionInRange < 0.75) {
         return { 
           allowed: false, 
-          reason: `After long loss: need pullback of ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}%, price only moved ${priceMovePercent.toFixed(3)}%` 
-        }
-      }
-      if (intendedSide === 'short' && priceMovePercent < REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
-        return { 
-          allowed: false, 
-          reason: `After short loss: need bounce of ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}%, price only moved ${priceMovePercent.toFixed(3)}%` 
+          reason: `SHORT blocked: price at ${(positionInRange*100).toFixed(0)}% of range (need top 25%). Range: $${reentryState.recentLow.toFixed(0)}-$${reentryState.recentHigh.toFixed(0)}`
         }
       }
     }
     
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 3: Don't LONG if price is in top 20% of recent range
-    // ═══════════════════════════════════════════════════════════════════
-    if (intendedSide === 'long' && rangeSize > REENTRY_THRESHOLDS.NOISE_THRESHOLD) {
-      const positionInRange = (currentPrice - reentryState.recentLow) / (reentryState.recentHigh - reentryState.recentLow)
-      if (positionInRange > 0.8) {
-        return { 
-          allowed: false, 
-          reason: `Price in top ${((1-positionInRange)*100).toFixed(0)}% of range - too close to high for long` 
-        }
-      }
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 4: Don't SHORT if price is in bottom 20% of recent range
-    // ═══════════════════════════════════════════════════════════════════
-    if (intendedSide === 'short' && rangeSize > REENTRY_THRESHOLDS.NOISE_THRESHOLD) {
-      const positionInRange = (currentPrice - reentryState.recentLow) / (reentryState.recentHigh - reentryState.recentLow)
-      if (positionInRange < 0.2) {
-        return { 
-          allowed: false, 
-          reason: `Price in bottom ${(positionInRange*100).toFixed(0)}% of range - too close to low for short` 
-        }
-      }
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 5: After profitable long exit, need full median swing pullback
-    // ═══════════════════════════════════════════════════════════════════
-    if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'long') {
-      if (priceMovePercent > -REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE) {
-        return { 
-          allowed: false, 
-          reason: `After profitable long: need -${REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE}% pullback, only ${priceMovePercent.toFixed(3)}%` 
-        }
-      }
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 6: After profitable short exit, need full median swing bounce
-    // ═══════════════════════════════════════════════════════════════════
-    if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'short') {
-      if (priceMovePercent < REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE) {
-        return { 
-          allowed: false, 
-          reason: `After profitable short: need +${REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE}% bounce, only ${priceMovePercent.toFixed(3)}%` 
-        }
-      }
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════
-    // RULE 7: After 2+ consecutive losses, require SIGNIFICANT move (0.8%)
-    // ═══════════════════════════════════════════════════════════════════
+    // After consecutive losses, require even better positioning
     if (reentryState.consecutiveLosses >= 2) {
-      if (absPriceMove < REENTRY_THRESHOLDS.SIGNIFICANT_MOVE) {
-        return { 
-          allowed: false, 
-          reason: `${reentryState.consecutiveLosses} losses: need ${REENTRY_THRESHOLDS.SIGNIFICANT_MOVE}% move (75th pct swing), only ${absPriceMove.toFixed(3)}%` 
+      if (intendedSide === 'long' && positionInRange > 0.15) {
+        return {
+          allowed: false,
+          reason: `${reentryState.consecutiveLosses} losses: need price in bottom 15%, currently at ${(positionInRange*100).toFixed(0)}%`
+        }
+      }
+      if (intendedSide === 'short' && positionInRange < 0.85) {
+        return {
+          allowed: false,
+          reason: `${reentryState.consecutiveLosses} losses: need price in top 15%, currently at ${(positionInRange*100).toFixed(0)}%`
         }
       }
     }
     
-    return { allowed: true, reason: `Price moved ${absPriceMove.toFixed(3)}% from exit - exceeds ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}% threshold` }
+    return { 
+      allowed: true, 
+      reason: `Entry allowed: price at ${(positionInRange*100).toFixed(0)}% of range (${intendedSide === 'long' ? 'bottom' : 'top'} zone)`
+    }
   }
   
   // ═══════════════════════════════════════════════════════════════════
@@ -1718,6 +1651,9 @@ Respond in JSON ONLY:
     return ema
   }
   
+  // Track recent prices for ATR high/low approximation
+  let recentPriceWindow: number[] = []
+  
   // Update EMAs with new price
   function updateEMAs(price: number): void {
     pyramidState.priceHistory.push(price)
@@ -1735,6 +1671,17 @@ Respond in JSON ONLY:
     
     // Update price extremes for smart re-entry
     updatePriceExtremes(price)
+    
+    // Update ATR with approximated high/low from recent prices
+    // Group ~30 price updates as one "candle" for ATR calculation
+    recentPriceWindow.push(price)
+    if (recentPriceWindow.length >= 30) {
+      const high = Math.max(...recentPriceWindow)
+      const low = Math.min(...recentPriceWindow)
+      const close = price
+      updateATR(high, low, close)
+      recentPriceWindow = []
+    }
   }
   
   // ═══════════════════════════════════════════════════════════════════
@@ -1986,36 +1933,91 @@ Respond in JSON:
   // Start hourly learning
   setInterval(learnFromRecentData, 60 * 60 * 1000)
   
-  // Calculate trailing stop based on EMAs
+  // ═══════════════════════════════════════════════════════════════════
+  // ATR-BASED STOP CALCULATION (from real ETHUSDT data analysis)
+  // 5-min ATR = ~$6.79 (0.20%), swing range = ~$42 (1.27%)
+  // Old 0.1% buffer was 2x too tight - getting stopped by noise
+  // ═══════════════════════════════════════════════════════════════════
+  
+  // Track ATR for data-driven stops
+  let atrState = {
+    prices: [] as { high: number; low: number; close: number }[],
+    atr14: 0,
+    swingHigh: 0,
+    swingLow: Infinity,
+    lastUpdate: 0
+  }
+  
+  function updateATR(high: number, low: number, close: number): void {
+    atrState.prices.push({ high, low, close })
+    if (atrState.prices.length > 100) atrState.prices.shift()
+    
+    // Calculate ATR(14) from true ranges
+    if (atrState.prices.length >= 2) {
+      const trs: number[] = []
+      for (let i = 1; i < atrState.prices.length; i++) {
+        const h = atrState.prices[i].high
+        const l = atrState.prices[i].low
+        const prevC = atrState.prices[i-1].close
+        const tr = Math.max(h - l, Math.abs(h - prevC), Math.abs(l - prevC))
+        trs.push(tr)
+      }
+      
+      const period = Math.min(14, trs.length)
+      atrState.atr14 = trs.slice(-period).reduce((a, b) => a + b, 0) / period
+    }
+    
+    // Track swing high/low over last 20 bars
+    const recent = atrState.prices.slice(-20)
+    if (recent.length > 0) {
+      atrState.swingHigh = Math.max(...recent.map(p => p.high))
+      atrState.swingLow = Math.min(...recent.map(p => p.low))
+    }
+  }
+  
+  // Calculate trailing stop using ATR and swing structure
   function calculateTrailingStop(side: 'long' | 'short', price: number): number {
-    const buffer = 0.001 // 0.1% buffer below/above EMA
+    // Default ATR if not yet calculated (0.20% from real data)
+    const atr = atrState.atr14 > 0 ? atrState.atr14 : price * 0.002
+    
+    // Use 1.5 ATR as minimum stop distance (from volatility analysis)
+    const atrBuffer = atr * 1.5
     
     if (side === 'long') {
-      // For longs: stop under nearest EMA support
-      const ema9Stop = pyramidState.ema9 * (1 - buffer)
-      const ema21Stop = pyramidState.ema21 * (1 - buffer)
-      const ema50Stop = pyramidState.ema50 * (1 - buffer)
+      // For longs: stop should be below swing low OR 1.5 ATR below entry
+      // Use the HIGHER of: swing low, or price - 1.5 ATR
+      const swingStop = atrState.swingLow > 0 && atrState.swingLow < Infinity 
+        ? atrState.swingLow - (atr * 0.5) // Just below swing low
+        : 0
+      const atrStop = price - atrBuffer
       
-      // Use highest EMA that's below current price as stop
-      let stop = 0
-      if (pyramidState.ema9 < price && pyramidState.ema9 > stop) stop = ema9Stop
-      if (pyramidState.ema21 < price && pyramidState.ema21 > stop) stop = ema21Stop
-      if (pyramidState.ema50 < price && pyramidState.ema50 > stop) stop = ema50Stop
+      // Also consider EMA50 as structural support
+      const ema50Stop = pyramidState.ema50 > 0 ? pyramidState.ema50 - (atr * 0.3) : 0
       
-      // Fallback: percentage-based stop
-      if (stop === 0) stop = price * (1 - PYRAMID_CONFIG.initialStopPercent / 100)
+      // Use the highest valid stop (tightest that's still safe)
+      let stop = Math.max(swingStop, atrStop, ema50Stop)
+      
+      // Never let stop be closer than 1 ATR
+      const minStop = price - atr
+      if (stop > minStop) stop = minStop
+      
+      // Fallback: 0.8% from price
+      if (stop <= 0) stop = price * (1 - PYRAMID_CONFIG.initialStopPercent / 100)
       
       return stop
     } else {
-      // For shorts: stop above nearest EMA resistance
-      const ema9Stop = pyramidState.ema9 * (1 + buffer)
-      const ema21Stop = pyramidState.ema21 * (1 + buffer)
-      const ema50Stop = pyramidState.ema50 * (1 + buffer)
+      // For shorts: stop above swing high OR 1.5 ATR above entry
+      const swingStop = atrState.swingHigh > 0 
+        ? atrState.swingHigh + (atr * 0.5)
+        : Infinity
+      const atrStop = price + atrBuffer
+      const ema50Stop = pyramidState.ema50 > 0 ? pyramidState.ema50 + (atr * 0.3) : Infinity
       
-      let stop = Infinity
-      if (pyramidState.ema9 > price && pyramidState.ema9 < stop) stop = ema9Stop
-      if (pyramidState.ema21 > price && pyramidState.ema21 < stop) stop = ema21Stop
-      if (pyramidState.ema50 > price && pyramidState.ema50 < stop) stop = ema50Stop
+      let stop = Math.min(swingStop, atrStop, ema50Stop)
+      
+      // Never let stop be closer than 1 ATR
+      const minStop = price + atr
+      if (stop < minStop) stop = minStop
       
       if (stop === Infinity) stop = price * (1 + PYRAMID_CONFIG.initialStopPercent / 100)
       
