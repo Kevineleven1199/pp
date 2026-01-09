@@ -1542,9 +1542,20 @@ Respond in JSON ONLY:
     console.log(`[SmartEntry] Exit recorded: ${side} @ $${exitPrice.toFixed(2)}, PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%, Consecutive losses: ${reentryState.consecutiveLosses}`)
   }
   
+  // ═══════════════════════════════════════════════════════════════════
+  // DATA-DRIVEN THRESHOLDS (from actual ETHUSDT candle/swing analysis)
+  // 1-min median move: 0.04%, 90th pct: 0.10%
+  // 5-min swing median: 0.53%, 75th pct: 0.80%
+  // ═══════════════════════════════════════════════════════════════════
+  const REENTRY_THRESHOLDS = {
+    MIN_SWING_MOVE: 0.35,        // 25th percentile of actual swings - minimum meaningful reversal
+    MEDIAN_SWING_MOVE: 0.53,    // Median swing-to-swing from 500 real swings
+    SIGNIFICANT_MOVE: 0.80,     // 75th percentile - strong move
+    NOISE_THRESHOLD: 0.10       // 90th percentile of 1-min moves - below this is just noise
+  }
+  
   function shouldAllowReentry(currentPrice: number, intendedSide: 'long' | 'short'): { allowed: boolean; reason: string } {
     const now = Date.now()
-    const timeSinceExit = now - reentryState.lastExitTime
     
     // First trade ever - allow it
     if (reentryState.lastExitTime === 0) {
@@ -1553,77 +1564,116 @@ Respond in JSON ONLY:
     
     // Calculate price move since exit
     const priceMovePercent = ((currentPrice - reentryState.lastExitPrice) / reentryState.lastExitPrice) * 100
+    const absPriceMove = Math.abs(priceMovePercent)
     reentryState.priceMoveSinceExit = priceMovePercent
     
     // Calculate distance from recent extremes
     const distanceFromHigh = ((reentryState.recentHigh - currentPrice) / currentPrice) * 100
     const distanceFromLow = ((currentPrice - reentryState.recentLow) / currentPrice) * 100
-    const timeSinceHigh = now - reentryState.recentHighTime
-    const timeSinceLow = now - reentryState.recentLowTime
+    const rangeSize = ((reentryState.recentHigh - reentryState.recentLow) / currentPrice) * 100
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 1: After a LOSS, require price to move meaningfully before re-entry
+    // RULE 1: ALWAYS require at least MIN_SWING_MOVE from exit price
+    // Data shows median swing is 0.53%, so 0.35% is minimum meaningful move
+    // ═══════════════════════════════════════════════════════════════════
+    if (absPriceMove < REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
+      return { 
+        allowed: false, 
+        reason: `Need ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}% move from exit (median swing=0.53%), only ${absPriceMove.toFixed(3)}%` 
+      }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 2: After LOSS, require MEDIAN swing move (0.53%)
     // ═══════════════════════════════════════════════════════════════════
     if (reentryState.lastExitPnl < 0) {
-      const requiredMove = 0.15 + (reentryState.consecutiveLosses * 0.1) // 0.15% + 0.1% per consecutive loss
+      const requiredMove = REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE + (reentryState.consecutiveLosses * 0.15)
       
-      if (intendedSide === 'long' && priceMovePercent > -requiredMove && priceMovePercent < requiredMove) {
-        return { allowed: false, reason: `After loss: need ${requiredMove.toFixed(2)}% move, only ${Math.abs(priceMovePercent).toFixed(2)}%` }
+      if (absPriceMove < requiredMove) {
+        return { 
+          allowed: false, 
+          reason: `After loss: need ${requiredMove.toFixed(2)}% swing move, only ${absPriceMove.toFixed(3)}%` 
+        }
       }
-      if (intendedSide === 'short' && priceMovePercent < requiredMove && priceMovePercent > -requiredMove) {
-        return { allowed: false, reason: `After loss: need ${requiredMove.toFixed(2)}% move, only ${Math.abs(priceMovePercent).toFixed(2)}%` }
+      
+      // Also check direction - if we lost on a long, price should have dropped before we re-long
+      if (intendedSide === 'long' && priceMovePercent > -REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
+        return { 
+          allowed: false, 
+          reason: `After long loss: need pullback of ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}%, price only moved ${priceMovePercent.toFixed(3)}%` 
+        }
+      }
+      if (intendedSide === 'short' && priceMovePercent < REENTRY_THRESHOLDS.MIN_SWING_MOVE) {
+        return { 
+          allowed: false, 
+          reason: `After short loss: need bounce of ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}%, price only moved ${priceMovePercent.toFixed(3)}%` 
+        }
       }
     }
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 2: Don't LONG near recent high (within 0.1% and high was recent)
+    // RULE 3: Don't LONG if price is in top 20% of recent range
     // ═══════════════════════════════════════════════════════════════════
-    if (intendedSide === 'long' && distanceFromHigh < 0.1 && timeSinceHigh < 60000) {
-      return { allowed: false, reason: `Too close to recent high ($${reentryState.recentHigh.toFixed(2)}, ${(timeSinceHigh/1000).toFixed(0)}s ago)` }
+    if (intendedSide === 'long' && rangeSize > REENTRY_THRESHOLDS.NOISE_THRESHOLD) {
+      const positionInRange = (currentPrice - reentryState.recentLow) / (reentryState.recentHigh - reentryState.recentLow)
+      if (positionInRange > 0.8) {
+        return { 
+          allowed: false, 
+          reason: `Price in top ${((1-positionInRange)*100).toFixed(0)}% of range - too close to high for long` 
+        }
+      }
     }
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 3: Don't SHORT near recent low (within 0.1% and low was recent)
+    // RULE 4: Don't SHORT if price is in bottom 20% of recent range
     // ═══════════════════════════════════════════════════════════════════
-    if (intendedSide === 'short' && distanceFromLow < 0.1 && timeSinceLow < 60000) {
-      return { allowed: false, reason: `Too close to recent low ($${reentryState.recentLow.toFixed(2)}, ${(timeSinceLow/1000).toFixed(0)}s ago)` }
+    if (intendedSide === 'short' && rangeSize > REENTRY_THRESHOLDS.NOISE_THRESHOLD) {
+      const positionInRange = (currentPrice - reentryState.recentLow) / (reentryState.recentHigh - reentryState.recentLow)
+      if (positionInRange < 0.2) {
+        return { 
+          allowed: false, 
+          reason: `Price in bottom ${(positionInRange*100).toFixed(0)}% of range - too close to low for short` 
+        }
+      }
     }
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 4: After profitable exit at HIGH, don't re-long until pullback
+    // RULE 5: After profitable long exit, need full median swing pullback
     // ═══════════════════════════════════════════════════════════════════
     if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'long') {
-      // We just sold at a profit - price likely near a local top
-      const pullbackRequired = 0.2 // Need 0.2% pullback before re-longing
-      if (priceMovePercent > -pullbackRequired) {
-        return { allowed: false, reason: `Waiting for pullback: need -${pullbackRequired}% from exit, currently ${priceMovePercent.toFixed(2)}%` }
+      if (priceMovePercent > -REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE) {
+        return { 
+          allowed: false, 
+          reason: `After profitable long: need -${REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE}% pullback, only ${priceMovePercent.toFixed(3)}%` 
+        }
       }
     }
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 5: After profitable exit at LOW, don't re-short until bounce
+    // RULE 6: After profitable short exit, need full median swing bounce
     // ═══════════════════════════════════════════════════════════════════
     if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'short') {
-      const bounceRequired = 0.2 // Need 0.2% bounce before re-shorting
-      if (priceMovePercent < bounceRequired) {
-        return { allowed: false, reason: `Waiting for bounce: need +${bounceRequired}% from exit, currently ${priceMovePercent.toFixed(2)}%` }
+      if (priceMovePercent < REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE) {
+        return { 
+          allowed: false, 
+          reason: `After profitable short: need +${REENTRY_THRESHOLDS.MEDIAN_SWING_MOVE}% bounce, only ${priceMovePercent.toFixed(3)}%` 
+        }
       }
     }
     
     // ═══════════════════════════════════════════════════════════════════
-    // RULE 6: After 3+ consecutive losses, require stronger confirmation
+    // RULE 7: After 2+ consecutive losses, require SIGNIFICANT move (0.8%)
     // ═══════════════════════════════════════════════════════════════════
-    if (reentryState.consecutiveLosses >= 3) {
-      const requiredMove = 0.5 // Need 0.5% move in intended direction
-      if (intendedSide === 'long' && priceMovePercent < requiredMove) {
-        return { allowed: false, reason: `${reentryState.consecutiveLosses} losses: need +${requiredMove}% confirmation, only ${priceMovePercent.toFixed(2)}%` }
-      }
-      if (intendedSide === 'short' && priceMovePercent > -requiredMove) {
-        return { allowed: false, reason: `${reentryState.consecutiveLosses} losses: need -${requiredMove}% confirmation, only ${priceMovePercent.toFixed(2)}%` }
+    if (reentryState.consecutiveLosses >= 2) {
+      if (absPriceMove < REENTRY_THRESHOLDS.SIGNIFICANT_MOVE) {
+        return { 
+          allowed: false, 
+          reason: `${reentryState.consecutiveLosses} losses: need ${REENTRY_THRESHOLDS.SIGNIFICANT_MOVE}% move (75th pct swing), only ${absPriceMove.toFixed(3)}%` 
+        }
       }
     }
     
-    return { allowed: true, reason: 'All checks passed' }
+    return { allowed: true, reason: `Price moved ${absPriceMove.toFixed(3)}% from exit - exceeds ${REENTRY_THRESHOLDS.MIN_SWING_MOVE}% threshold` }
   }
   
   // ═══════════════════════════════════════════════════════════════════

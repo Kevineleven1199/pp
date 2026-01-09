@@ -8,7 +8,7 @@ import PyramidPage from './pages/PyramidPage'
 import SettingsPage from './pages/SettingsPage'
 
 // Version number - increment by 0.1 each update
-export const APP_VERSION = '11.3'
+export const APP_VERSION = '11.4'
 
 type PageKey = 'live' | 'swings' | 'strategies' | 'pyramid' | 'summary' | 'status' | 'settings'
 
