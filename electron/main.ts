@@ -1168,7 +1168,259 @@ Respond in JSON format ONLY:
     pyramidState.ema21 = calculateEMA(pyramidState.priceHistory, 21)
     pyramidState.ema50 = calculateEMA(pyramidState.priceHistory, 50)
     pyramidState.ema200 = calculateEMA(pyramidState.priceHistory, 200)
+    
+    // Update live candle collector
+    updateLiveCandle(price, Date.now())
   }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // LIVE ETHUSDT DATA COLLECTOR - All timeframes, permanent storage
+  // ═══════════════════════════════════════════════════════════════════
+  const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h']
+  const TIMEFRAME_MS: Record<string, number> = {
+    '1m': 60000, '3m': 180000, '5m': 300000, '15m': 900000,
+    '30m': 1800000, '1h': 3600000, '2h': 7200000, '4h': 14400000
+  }
+  
+  interface LiveCandle {
+    openTime: number
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+    trades: number
+  }
+  
+  const liveCandles: Record<string, LiveCandle | null> = {}
+  const candleBuffers: Record<string, LiveCandle[]> = {}
+  let lastCandleSave = 0
+  
+  // Initialize buffers for all timeframes
+  for (const tf of TIMEFRAMES) {
+    liveCandles[tf] = null
+    candleBuffers[tf] = []
+  }
+  
+  // API Stats Tracking
+  const apiStats = {
+    totalCalls: 0,
+    successfulCalls: 0,
+    failedCalls: 0,
+    totalLatencyMs: 0,
+    avgLatencyMs: 0,
+    lastError: '',
+    lastErrorTime: 0,
+    errorsByType: {} as Record<string, number>,
+    callsByEndpoint: {} as Record<string, number>,
+    startTime: Date.now()
+  }
+  const apiStatsFile = path.join(traderDataDir, 'api-stats.json')
+  
+  function trackApiCall(endpoint: string, success: boolean, latencyMs: number, error?: string): void {
+    apiStats.totalCalls++
+    apiStats.callsByEndpoint[endpoint] = (apiStats.callsByEndpoint[endpoint] || 0) + 1
+    
+    if (success) {
+      apiStats.successfulCalls++
+      apiStats.totalLatencyMs += latencyMs
+      apiStats.avgLatencyMs = apiStats.totalLatencyMs / apiStats.successfulCalls
+    } else {
+      apiStats.failedCalls++
+      apiStats.lastError = error || 'Unknown error'
+      apiStats.lastErrorTime = Date.now()
+      const errorType = error?.split(':')[0] || 'Unknown'
+      apiStats.errorsByType[errorType] = (apiStats.errorsByType[errorType] || 0) + 1
+    }
+  }
+  
+  function saveApiStats(): void {
+    try {
+      fs.writeFileSync(apiStatsFile, JSON.stringify(apiStats, null, 2), 'utf-8')
+    } catch {}
+  }
+  
+  function loadApiStats(): void {
+    try {
+      if (fs.existsSync(apiStatsFile)) {
+        const data = JSON.parse(fs.readFileSync(apiStatsFile, 'utf-8'))
+        Object.assign(apiStats, data)
+        apiStats.startTime = Date.now() // Reset uptime on load
+      }
+    } catch {}
+  }
+  loadApiStats()
+  
+  function updateLiveCandle(price: number, timestamp: number): void {
+    for (const tf of TIMEFRAMES) {
+      const intervalMs = TIMEFRAME_MS[tf]
+      const candleOpenTime = Math.floor(timestamp / intervalMs) * intervalMs
+      
+      if (!liveCandles[tf] || liveCandles[tf]!.openTime !== candleOpenTime) {
+        // Save completed candle
+        if (liveCandles[tf]) {
+          candleBuffers[tf].push({ ...liveCandles[tf]! })
+          
+          // Keep reasonable buffer size per timeframe
+          const maxBufferSize = tf === '1m' ? 1440 : tf === '5m' ? 288 : 100
+          if (candleBuffers[tf].length > maxBufferSize) {
+            candleBuffers[tf].shift()
+          }
+        }
+        
+        // Start new candle
+        liveCandles[tf] = {
+          openTime: candleOpenTime,
+          open: price,
+          high: price,
+          low: price,
+          close: price,
+          volume: 0,
+          trades: 1
+        }
+      } else {
+        // Update current candle
+        const candle = liveCandles[tf]!
+        candle.high = Math.max(candle.high, price)
+        candle.low = Math.min(candle.low, price)
+        candle.close = price
+        candle.trades++
+      }
+    }
+    
+    // Save to disk every 2 minutes (async, non-blocking)
+    if (Date.now() - lastCandleSave > 120000) {
+      setImmediate(() => saveLiveCandlesToDisk())
+      lastCandleSave = Date.now()
+    }
+  }
+  
+  function saveLiveCandlesToDisk(): void {
+    const today = new Date().toISOString().slice(0, 10)
+    
+    for (const tf of TIMEFRAMES) {
+      if (candleBuffers[tf].length === 0) continue
+      
+      try {
+        const candleDir = path.join(traderDataDir, '..', 'candles', 'asterdex', 'ethusdt', tf)
+        fs.mkdirSync(candleDir, { recursive: true })
+        
+        const filePath = path.join(candleDir, `${today}.jsonl`)
+        const lines = candleBuffers[tf].map(c => JSON.stringify({
+          exchange: 'asterdex',
+          symbol: 'ETHUSDT',
+          interval: tf,
+          openTime: c.openTime,
+          closeTime: c.openTime + TIMEFRAME_MS[tf] - 1,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume,
+          quoteVolume: 0,
+          trades: c.trades,
+          takerBuyBase: 0,
+          takerBuyQuote: 0
+        })).join('\n')
+        
+        // Append to existing file or create new
+        fs.appendFileSync(filePath, lines + '\n', 'utf-8')
+        
+        // Clear buffer after saving
+        candleBuffers[tf] = []
+      } catch (err: any) {
+        console.error(`[LiveData] Failed to save ${tf} candles:`, err.message)
+      }
+    }
+    
+    // Save API stats too
+    saveApiStats()
+    
+    console.log(`[LiveData] Saved ETHUSDT candles for ${TIMEFRAMES.length} timeframes`)
+  }
+  
+  // AI Pattern Learning - runs every hour
+  async function learnFromRecentData(): Promise<void> {
+    if (!OPENROUTER_API_KEY) return
+    
+    console.log('[AI-Learn] Analyzing recent ETHUSDT patterns...')
+    
+    try {
+      // Get recent 1h candles for pattern analysis
+      const recentCandles = candleBuffers['1h'].slice(-24) // Last 24 hours
+      if (recentCandles.length < 6) return
+      
+      const candleData = recentCandles.map(c => ({
+        time: new Date(c.openTime).toISOString(),
+        o: c.open.toFixed(2),
+        h: c.high.toFixed(2),
+        l: c.low.toFixed(2),
+        c: c.close.toFixed(2)
+      }))
+      
+      const prompt = `Analyze these recent ETHUSDT 1-hour candles and identify patterns:
+
+${JSON.stringify(candleData, null, 1)}
+
+API Performance:
+- Total calls: ${apiStats.totalCalls}
+- Success rate: ${((apiStats.successfulCalls / Math.max(1, apiStats.totalCalls)) * 100).toFixed(1)}%
+- Avg latency: ${apiStats.avgLatencyMs.toFixed(0)}ms
+- Recent errors: ${Object.entries(apiStats.errorsByType).map(([k, v]) => `${k}:${v}`).join(', ') || 'None'}
+
+Identify:
+1. Any recurring patterns (double tops, wedges, channels)
+2. Key support/resistance levels
+3. Volume patterns
+4. Time-of-day patterns
+5. Suggested entry/exit points
+
+Respond in JSON:
+{
+  "patterns": ["pattern1", "pattern2"],
+  "support": [price1, price2],
+  "resistance": [price1, price2],
+  "insight": "Key insight",
+  "suggestion": "LONG|SHORT|WAIT"
+}`
+
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'anthropic/claude-3.5-sonnet',
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 500
+        })
+      })
+      
+      trackApiCall('openrouter/learn', response.ok, 0)
+      
+      if (response.ok) {
+        const result = await response.json() as any
+        const content = result.choices?.[0]?.message?.content || '{}'
+        console.log('[AI-Learn] Pattern analysis:', content.slice(0, 200) + '...')
+        
+        // Save learned patterns
+        const learnedFile = path.join(traderDataDir, 'learned-patterns.json')
+        const existing = fs.existsSync(learnedFile) 
+          ? JSON.parse(fs.readFileSync(learnedFile, 'utf-8')) 
+          : []
+        existing.unshift({ timestamp: Date.now(), analysis: content })
+        if (existing.length > 100) existing.pop()
+        fs.writeFileSync(learnedFile, JSON.stringify(existing, null, 2), 'utf-8')
+      }
+    } catch (err: any) {
+      trackApiCall('openrouter/learn', false, 0, err.message)
+      console.error('[AI-Learn] Error:', err.message)
+    }
+  }
+  
+  // Start hourly learning
+  setInterval(learnFromRecentData, 60 * 60 * 1000)
   
   // Calculate trailing stop based on EMAs
   function calculateTrailingStop(side: 'long' | 'short', price: number): number {
@@ -2016,6 +2268,23 @@ Respond in JSON format ONLY:
   // Get market journal entries
   ipcMain.handle('trader:getMarketJournal', async () => {
     return marketJournal.slice(0, 20)
+  })
+  
+  // Get API stats
+  ipcMain.handle('trader:getApiStats', async () => {
+    return {
+      ...apiStats,
+      uptime: Date.now() - apiStats.startTime,
+      successRate: apiStats.totalCalls > 0 
+        ? ((apiStats.successfulCalls / apiStats.totalCalls) * 100).toFixed(1) + '%'
+        : '0%',
+      liveDataStatus: {
+        timeframes: TIMEFRAMES,
+        candlesCollected: Object.fromEntries(
+          TIMEFRAMES.map(tf => [tf, candleBuffers[tf]?.length || 0])
+        )
+      }
+    }
   })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets

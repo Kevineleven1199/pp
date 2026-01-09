@@ -556,9 +556,11 @@ export default function PyramidPage() {
       if (hasKeys) {
         // We have saved keys - set a placeholder so UI knows we're configured
         setApiSettings(prev => ({
-          ...prev,
           asterDexApiKey: 'saved-on-disk',
-          asterDexApiSecret: 'saved-on-disk'
+          asterDexApiSecret: 'saved-on-disk',
+          asterDexTestnet: prev?.asterDexTestnet ?? false,
+          pyramidAutoTrade: prev?.pyramidAutoTrade ?? false,
+          pyramidMaxPositionUsd: prev?.pyramidMaxPositionUsd ?? 100
         }))
       }
     }).catch(() => {})
@@ -1108,7 +1110,7 @@ export default function PyramidPage() {
               marginBottom: 12
             }}>
               <div style={{ fontSize: 12, color: '#60a5fa', marginBottom: 8 }}>
-                🔑 AsterDEX API Keys {accountBalance?.marginBalance > 0 ? '(Connected)' : '(Enter to connect)'}
+                🔑 AsterDEX API Keys {(accountBalance?.marginBalance ?? 0) > 0 ? '(Connected)' : '(Enter to connect)'}
               </div>
               <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
                 <input
@@ -1148,11 +1150,12 @@ export default function PyramidPage() {
                       await (window as any).pricePerfect.trader?.saveApiKeys(key, secret)
                       
                       // Also save to localStorage for UI state
-                      const newSettings = {
-                        ...apiSettings,
+                      const newSettings: ApiSettings = {
                         asterDexApiKey: key,
                         asterDexApiSecret: secret,
-                        asterDexTestnet: false
+                        asterDexTestnet: false,
+                        pyramidAutoTrade: false,
+                        pyramidMaxPositionUsd: 100
                       }
                       localStorage.setItem('pricePerfect_apiSettings', JSON.stringify(newSettings))
                       setApiSettings(newSettings)
