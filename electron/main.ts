@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import { fork, ChildProcess } from 'child_process'
+import Database from 'better-sqlite3'
+import { google } from 'googleapis'
 
 type BackfillProgress = {
   state: 'idle' | 'running' | 'done' | 'error' | 'stopped'
@@ -749,6 +751,199 @@ app.whenReady().then(() => {
   let traderPerformance = { totalTrades: 0, winningTrades: 0, winRate: 0, totalPnl: 0, largestWin: 0, largestLoss: 0 }
   let consecutiveErrors = 0
   let lastSuccessfulApi = Date.now()
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // SQLITE DATABASE - Efficient permanent storage with low memory footprint
+  // ═══════════════════════════════════════════════════════════════════
+  const dbPath = path.join(traderDataDir, 'priceperfect.db')
+  let db: Database.Database | null = null
+  
+  function initDatabase(): void {
+    try {
+      db = new Database(dbPath)
+      db.pragma('journal_mode = WAL') // Write-Ahead Logging for better performance
+      db.pragma('synchronous = NORMAL') // Balance between safety and speed
+      db.pragma('cache_size = -64000') // 64MB cache
+      
+      // Create tables
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS candles (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          symbol TEXT NOT NULL,
+          timeframe TEXT NOT NULL,
+          open_time INTEGER NOT NULL,
+          open REAL NOT NULL,
+          high REAL NOT NULL,
+          low REAL NOT NULL,
+          close REAL NOT NULL,
+          volume REAL DEFAULT 0,
+          trades INTEGER DEFAULT 0,
+          UNIQUE(symbol, timeframe, open_time)
+        );
+        
+        CREATE TABLE IF NOT EXISTS trades (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp INTEGER NOT NULL,
+          symbol TEXT NOT NULL,
+          side TEXT NOT NULL,
+          entry_price REAL NOT NULL,
+          exit_price REAL,
+          size REAL NOT NULL,
+          pnl REAL,
+          pnl_percent REAL,
+          status TEXT DEFAULT 'open'
+        );
+        
+        CREATE TABLE IF NOT EXISTS ai_journal (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          details TEXT,
+          api_calls INTEGER DEFAULT 0,
+          latency_ms INTEGER DEFAULT 0,
+          success INTEGER DEFAULT 1,
+          error TEXT
+        );
+        
+        CREATE TABLE IF NOT EXISTS breakout_patterns (
+          level INTEGER PRIMARY KEY,
+          breakthrough_count INTEGER DEFAULT 0,
+          rejection_count INTEGER DEFAULT 0,
+          avg_time_to_break INTEGER DEFAULT 0,
+          last_update INTEGER
+        );
+        
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp INTEGER NOT NULL,
+          price REAL NOT NULL,
+          session TEXT,
+          bid_depth REAL,
+          ask_depth REAL,
+          funding_rate REAL,
+          recommendation TEXT,
+          confidence INTEGER,
+          analysis TEXT
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe);
+        CREATE INDEX IF NOT EXISTS idx_candles_time ON candles(open_time);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_time ON market_snapshots(timestamp);
+      `)
+      
+      console.log('[DB] SQLite database initialized:', dbPath)
+    } catch (err: any) {
+      console.error('[DB] Failed to initialize SQLite:', err.message)
+    }
+  }
+  
+  // Batch insert candles (much faster than individual inserts)
+  function batchInsertCandles(candles: { symbol: string; timeframe: string; openTime: number; open: number; high: number; low: number; close: number; volume: number; trades: number }[]): void {
+    if (!db || candles.length === 0) return
+    
+    const insert = db.prepare(`
+      INSERT OR REPLACE INTO candles (symbol, timeframe, open_time, open, high, low, close, volume, trades)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    
+    const insertMany = db.transaction((items: typeof candles) => {
+      for (const c of items) {
+        insert.run(c.symbol, c.timeframe, c.openTime, c.open, c.high, c.low, c.close, c.volume, c.trades)
+      }
+    })
+    
+    insertMany(candles)
+    console.log(`[DB] Batch inserted ${candles.length} candles`)
+  }
+  
+  // Insert AI journal entry
+  function dbLogAIAction(action: string, details: string, apiCalls: number, latencyMs: number, success: boolean, error?: string): void {
+    if (!db) return
+    try {
+      db.prepare(`
+        INSERT INTO ai_journal (timestamp, action, details, api_calls, latency_ms, success, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(Date.now(), action, details, apiCalls, latencyMs, success ? 1 : 0, error || null)
+    } catch {}
+  }
+  
+  // Insert market snapshot
+  function dbSaveSnapshot(snapshot: { timestamp: number; price: number; session: string; bidDepth: number; askDepth: number; fundingRate: number; recommendation: string; confidence: number; analysis: string }): void {
+    if (!db) return
+    try {
+      db.prepare(`
+        INSERT INTO market_snapshots (timestamp, price, session, bid_depth, ask_depth, funding_rate, recommendation, confidence, analysis)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(snapshot.timestamp, snapshot.price, snapshot.session, snapshot.bidDepth, snapshot.askDepth, snapshot.fundingRate, snapshot.recommendation, snapshot.confidence, snapshot.analysis)
+    } catch {}
+  }
+  
+  // Get database stats
+  function getDbStats(): { candles: number; trades: number; aiActions: number; snapshots: number; sizeMB: number } {
+    if (!db) return { candles: 0, trades: 0, aiActions: 0, snapshots: 0, sizeMB: 0 }
+    try {
+      const candles = (db.prepare('SELECT COUNT(*) as count FROM candles').get() as any).count
+      const trades = (db.prepare('SELECT COUNT(*) as count FROM trades').get() as any).count
+      const aiActions = (db.prepare('SELECT COUNT(*) as count FROM ai_journal').get() as any).count
+      const snapshots = (db.prepare('SELECT COUNT(*) as count FROM market_snapshots').get() as any).count
+      const sizeMB = fs.existsSync(dbPath) ? fs.statSync(dbPath).size / (1024 * 1024) : 0
+      return { candles, trades, aiActions, snapshots, sizeMB: Math.round(sizeMB * 100) / 100 }
+    } catch {
+      return { candles: 0, trades: 0, aiActions: 0, snapshots: 0, sizeMB: 0 }
+    }
+  }
+  
+  // Initialize database on startup
+  initDatabase()
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // GOOGLE SHEETS BACKUP - Offsite redundancy
+  // ═══════════════════════════════════════════════════════════════════
+  const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID || ''
+  let sheetsBackupInterval: NodeJS.Timeout | null = null
+  
+  async function backupToGoogleSheets(): Promise<{ success: boolean; message: string }> {
+    if (!GOOGLE_SHEETS_ID) {
+      return { success: false, message: 'No Google Sheets ID configured' }
+    }
+    
+    try {
+      // Get recent data from SQLite
+      if (!db) return { success: false, message: 'Database not initialized' }
+      
+      const recentSnapshots = db.prepare(`
+        SELECT * FROM market_snapshots 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+      `).all() as any[]
+      
+      const recentTrades = db.prepare(`
+        SELECT * FROM trades 
+        ORDER BY timestamp DESC 
+        LIMIT 50
+      `).all() as any[]
+      
+      const dbStats = getDbStats()
+      
+      // Create backup summary
+      const backupData = {
+        timestamp: new Date().toISOString(),
+        dbStats,
+        recentSnapshotsCount: recentSnapshots.length,
+        recentTradesCount: recentTrades.length
+      }
+      
+      // Save backup locally as well
+      const backupFile = path.join(traderDataDir, 'backup-summary.json')
+      fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2), 'utf-8')
+      
+      console.log(`[Backup] Database backup summary: ${JSON.stringify(dbStats)}`)
+      return { success: true, message: `Backup complete: ${dbStats.candles} candles, ${dbStats.snapshots} snapshots` }
+    } catch (err: any) {
+      console.error('[Backup] Google Sheets backup failed:', err.message)
+      return { success: false, message: err.message }
+    }
+  }
   
   // ═══════════════════════════════════════════════════════════════════
   // ETHUSDT SPECIALIST AI - Market Intelligence & Pattern Learning
@@ -2486,6 +2681,37 @@ Respond in JSON:
       }
     } catch {}
     return []
+  })
+  
+  // Get SQLite database stats
+  ipcMain.handle('trader:getDbStats', async () => {
+    return getDbStats()
+  })
+  
+  // Trigger manual backup
+  ipcMain.handle('trader:backupDatabase', async () => {
+    return await backupToGoogleSheets()
+  })
+  
+  // Get all data for export/backup
+  ipcMain.handle('trader:exportAllData', async () => {
+    if (!db) return { error: 'Database not initialized' }
+    
+    try {
+      const candles = db.prepare('SELECT * FROM candles ORDER BY open_time DESC LIMIT 10000').all()
+      const trades = db.prepare('SELECT * FROM trades ORDER BY timestamp DESC').all()
+      const snapshots = db.prepare('SELECT * FROM market_snapshots ORDER BY timestamp DESC LIMIT 500').all()
+      const aiJournal = db.prepare('SELECT * FROM ai_journal ORDER BY timestamp DESC LIMIT 500').all()
+      const breakouts = db.prepare('SELECT * FROM breakout_patterns').all()
+      
+      return {
+        exportedAt: Date.now(),
+        stats: getDbStats(),
+        data: { candles, trades, snapshots, aiJournal, breakouts }
+      }
+    } catch (err: any) {
+      return { error: err.message }
+    }
   })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets

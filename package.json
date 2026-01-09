@@ -18,9 +18,11 @@
     "dist:win:portable": "npm run build && electron-builder --win portable"
   },
   "dependencies": {
+    "better-sqlite3": "^12.5.0",
     "bottleneck": "^2.19.5",
     "decimal.js": "^10.4.3",
     "events": "^3.3.0",
+    "googleapis": "^170.0.0",
     "lightweight-charts": "^4.2.1",
     "node-fetch": "^2.7.0",
     "p-queue": "^6.6.2",
@@ -32,6 +34,7 @@
     "ws": "^8.17.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.14.9",
     "@types/node-fetch": "^2.6.11",
     "@types/react": "^18.3.3",
