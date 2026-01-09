@@ -514,6 +514,22 @@ export default function PyramidPage() {
     blockedReasons: Record<string, number>
   } | null>(null)
   const [recentSignals, setRecentSignals] = useState<any[]>([])
+  
+  // Extended Position Data (matching AsterDEX UI)
+  const [extendedPosition, setExtendedPosition] = useState<{
+    size: number
+    entryPrice: number
+    markPrice: number
+    liquidationPrice: number
+    margin: number
+    leverage: number
+    unrealizedPnl: number
+    unrealizedPnlPercent: number
+    marginRatio: number
+    maintenanceMargin: number
+    notional: number
+    side: 'long' | 'short' | null
+  } | null>(null)
 
   // Load API settings - check both localStorage AND saved keys on disk
   useEffect(() => {
@@ -697,6 +713,11 @@ export default function PyramidPage() {
         setRecentSignals(prev => [data.signal, ...prev.slice(0, 49)])
       }
     })
+    
+    // Listen for extended position updates
+    const offPositionUpdate = (window as any).pricePerfect.trader?.on('positionUpdate', (pos: any) => {
+      if (pos) setExtendedPosition(pos)
+    })
 
     return () => {
       offHealth?.()
@@ -706,6 +727,7 @@ export default function PyramidPage() {
       offPyramidUpdate?.()
       offHistoryUpdate?.()
       offSignalLog?.()
+      offPositionUpdate?.()
     }
   }, [livePrice])
 
@@ -1228,10 +1250,101 @@ export default function PyramidPage() {
             </div>
           </div>
 
-          {/* Current Position */}
-          <div style={{ flex: '1 1 250px' }}>
+          {/* Current Position - AsterDEX Style */}
+          <div style={{ flex: '1 1 320px' }}>
             <div style={{ fontSize: 10, color: '#6b7785', marginBottom: 8 }}>CURRENT POSITION</div>
-            {livePosition ? (
+            {extendedPosition && extendedPosition.side ? (
+              <div style={{ 
+                padding: 12, 
+                background: extendedPosition.side === 'long' ? '#0a3622' : '#3f1219', 
+                borderRadius: 8,
+                border: `1px solid ${extendedPosition.side === 'long' ? '#22c55e' : '#ef4444'}`
+              }}>
+                {/* Header: Side + Size + PNL */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div>
+                    <span style={{ 
+                      fontSize: 11, 
+                      fontWeight: 700, 
+                      color: extendedPosition.side === 'long' ? '#4ade80' : '#fca5a5',
+                      background: extendedPosition.side === 'long' ? '#166534' : '#991b1b',
+                      padding: '2px 6px',
+                      borderRadius: 4
+                    }}>
+                      {extendedPosition.side.toUpperCase()} {extendedPosition.leverage}x
+                    </span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: '#e6eaf2', marginLeft: 8 }}>
+                      {extendedPosition.size.toFixed(4)} ETH
+                    </span>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ 
+                      fontSize: 14, 
+                      fontWeight: 700, 
+                      color: extendedPosition.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5'
+                    }}>
+                      {extendedPosition.unrealizedPnl >= 0 ? '+' : ''}{extendedPosition.unrealizedPnl.toFixed(2)} USDT
+                    </div>
+                    <div style={{ 
+                      fontSize: 11, 
+                      color: extendedPosition.unrealizedPnlPercent >= 0 ? '#4ade80' : '#fca5a5'
+                    }}>
+                      {extendedPosition.unrealizedPnlPercent >= 0 ? '+' : ''}{extendedPosition.unrealizedPnlPercent.toFixed(2)}% ROE
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Price Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: '#6b7785' }}>Entry Price</div>
+                    <div style={{ fontSize: 11, color: '#e6eaf2', fontFamily: 'monospace' }}>${extendedPosition.entryPrice.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: '#6b7785' }}>Mark Price</div>
+                    <div style={{ fontSize: 11, color: '#e6eaf2', fontFamily: 'monospace' }}>${extendedPosition.markPrice.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: '#ef4444' }}>Liq. Price</div>
+                    <div style={{ fontSize: 11, color: '#fca5a5', fontFamily: 'monospace' }}>${extendedPosition.liquidationPrice.toFixed(2)}</div>
+                  </div>
+                </div>
+                
+                {/* Margin Details */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, paddingTop: 8, borderTop: '1px solid #2d3748' }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: '#6b7785' }}>Margin</div>
+                    <div style={{ fontSize: 11, color: '#e6eaf2', fontFamily: 'monospace' }}>{extendedPosition.margin.toFixed(2)} USDT</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: '#6b7785' }}>Maint. Margin</div>
+                    <div style={{ fontSize: 11, color: '#9aa4b2', fontFamily: 'monospace' }}>{extendedPosition.maintenanceMargin.toFixed(2)} USDT</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: extendedPosition.marginRatio > 50 ? '#ef4444' : '#6b7785' }}>Margin Ratio</div>
+                    <div style={{ fontSize: 11, color: extendedPosition.marginRatio > 50 ? '#fca5a5' : '#4ade80', fontFamily: 'monospace' }}>
+                      {extendedPosition.marginRatio.toFixed(2)}%
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Planned Stop Loss */}
+                {livePyramid && livePyramid.trailingStop > 0 && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #2d3748' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <div>
+                        <div style={{ fontSize: 9, color: '#f59e0b' }}>Planned Stop (EMA)</div>
+                        <div style={{ fontSize: 11, color: '#fbbf24', fontFamily: 'monospace' }}>${livePyramid.trailingStop.toFixed(2)}</div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 9, color: '#6b7785' }}>Notional</div>
+                        <div style={{ fontSize: 11, color: '#9aa4b2', fontFamily: 'monospace' }}>${extendedPosition.notional.toFixed(2)}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : livePosition ? (
               <div style={{ 
                 padding: 12, 
                 background: livePosition.side === 'long' ? '#0a3622' : '#3f1219', 
@@ -1239,18 +1352,10 @@ export default function PyramidPage() {
                 border: `1px solid ${livePosition.side === 'long' ? '#22c55e' : '#ef4444'}`
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span style={{ 
-                    fontSize: 14, 
-                    fontWeight: 700, 
-                    color: livePosition.side === 'long' ? '#4ade80' : '#fca5a5'
-                  }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: livePosition.side === 'long' ? '#4ade80' : '#fca5a5' }}>
                     {livePosition.side.toUpperCase()} {livePosition.size.toFixed(4)} ETH
                   </span>
-                  <span style={{ 
-                    fontSize: 14, 
-                    fontWeight: 700, 
-                    color: livePosition.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5'
-                  }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: livePosition.unrealizedPnl >= 0 ? '#4ade80' : '#fca5a5' }}>
                     {livePosition.unrealizedPnl >= 0 ? '+' : ''}${livePosition.unrealizedPnl.toFixed(2)}
                   </span>
                 </div>

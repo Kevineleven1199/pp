@@ -1002,34 +1002,103 @@ app.whenReady().then(() => {
     return lastKnownBalance
   }
   
-  // Fetch current position
+  // Extended position data (matching AsterDEX UI)
+  let extendedPosition = {
+    size: 0,                    // ETH amount
+    entryPrice: 0,
+    markPrice: 0,
+    liquidationPrice: 0,
+    margin: 0,                  // Isolated margin in USDT
+    leverage: LEVERAGE,
+    unrealizedPnl: 0,
+    unrealizedPnlPercent: 0,    // ROE%
+    marginRatio: 0,             // Margin ratio %
+    maintenanceMargin: 0,
+    notional: 0,                // Position value in USDT
+    side: null as 'long' | 'short' | null
+  }
+  
+  // Fetch current position with FULL details
   async function fetchPosition(): Promise<void> {
     if (!traderApiKey || !traderApiSecret) return
     
     try {
-      const positions = await asterDexRequest('GET', '/fapi/v2/positionRisk', { symbol: SYMBOL }) as Array<{ positionAmt: string; entryPrice: string; unRealizedProfit: string; positionSide: string }>
+      const positions = await asterDexRequest('GET', '/fapi/v2/positionRisk', { symbol: SYMBOL }) as Array<{
+        positionAmt: string
+        entryPrice: string
+        unRealizedProfit: string
+        positionSide: string
+        markPrice: string
+        liquidationPrice: string
+        isolatedMargin: string
+        leverage: string
+        notional: string
+        isolatedWallet: string
+        marginType: string
+      }>
       
       for (const pos of positions) {
         const amt = parseFloat(pos.positionAmt || '0')
         if (amt !== 0) {
+          const size = Math.abs(amt)
+          const entryPrice = parseFloat(pos.entryPrice || '0')
+          const markPrice = parseFloat(pos.markPrice || '0')
+          const unrealizedPnl = parseFloat(pos.unRealizedProfit || '0')
+          const isolatedMargin = parseFloat(pos.isolatedMargin || '0')
+          const liquidationPrice = parseFloat(pos.liquidationPrice || '0')
+          const leverage = parseInt(pos.leverage || String(LEVERAGE))
+          const notional = parseFloat(pos.notional || '0')
+          
+          // Calculate ROE% = (unrealizedPnl / margin) * 100
+          const roe = isolatedMargin > 0 ? (unrealizedPnl / isolatedMargin) * 100 : 0
+          
+          // Maintenance margin = 0.5% of notional for AsterDEX
+          const maintenanceMargin = Math.abs(notional) * 0.005
+          
+          // Margin ratio = maintenance margin / (margin + unrealizedPnl)
+          const marginBalance = isolatedMargin + unrealizedPnl
+          const marginRatio = marginBalance > 0 ? (maintenanceMargin / marginBalance) * 100 : 0
+          
           currentPosition = {
             side: amt > 0 ? 'long' : 'short',
-            size: Math.abs(amt),
-            entryPrice: parseFloat(pos.entryPrice || '0'),
-            unrealizedPnl: parseFloat(pos.unRealizedProfit || '0')
+            size,
+            entryPrice,
+            unrealizedPnl
+          }
+          
+          extendedPosition = {
+            size,
+            entryPrice,
+            markPrice,
+            liquidationPrice,
+            margin: isolatedMargin,
+            leverage,
+            unrealizedPnl,
+            unrealizedPnlPercent: roe,
+            marginRatio,
+            maintenanceMargin,
+            notional: Math.abs(notional),
+            side: amt > 0 ? 'long' : 'short'
           }
           
           // Anti-liquidation check
-          const liqDistance = Math.abs(lastKnownPrice - currentPosition.entryPrice) / currentPosition.entryPrice
-          if (liqDistance > 0.008) { // 0.8% from entry (88x = ~1.1% liquidation)
-            console.warn(`[Trader] WARNING: Position ${liqDistance.toFixed(2)}% from entry, approaching liquidation zone!`)
+          const liqDistance = liquidationPrice > 0 
+            ? Math.abs(markPrice - liquidationPrice) / markPrice * 100
+            : 0
+          if (liqDistance < 2) {
+            console.warn(`[Trader] ⚠️ DANGER: Only ${liqDistance.toFixed(2)}% from liquidation!`)
           }
+          
+          // Send extended position to UI
+          mainWindow?.webContents.send('trader:positionUpdate', extendedPosition)
           return
         }
       }
       
       // No position found
       currentPosition = { side: null, size: 0, entryPrice: 0, unrealizedPnl: 0 }
+      extendedPosition = { ...extendedPosition, size: 0, side: null, margin: 0, unrealizedPnl: 0 }
+      mainWindow?.webContents.send('trader:positionUpdate', extendedPosition)
     } catch (err: any) {
       console.error('[Trader] Position fetch error:', err.message)
     }
