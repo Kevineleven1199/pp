@@ -1219,9 +1219,13 @@ async function startDerivedRebuild(maxDays?: number) {
     const todayKey = new Date().toISOString().slice(0, 10)
     files = files.filter((f) => f !== `${todayKey}.jsonl`)
 
-    if (typeof maxDays === 'number' && maxDays > 0 && files.length > maxDays) {
-      files = files.slice(files.length - Math.floor(maxDays))
+    // MEMORY FIX: Hard limit of 90 days to prevent 88GB memory explosion
+    const HARD_MAX_DAYS = 90
+    const effectiveMaxDays = Math.min(maxDays || HARD_MAX_DAYS, HARD_MAX_DAYS)
+    if (files.length > effectiveMaxDays) {
+      files = files.slice(files.length - effectiveMaxDays)
     }
+    console.log(`[Engine] Processing ${files.length} files (max ${effectiveMaxDays} days)`)
 
     const rebuildSeries = new CandleSeries()
     const rebuildAggregators = aggregateIntervals
@@ -2163,9 +2167,13 @@ async function startDerivedRebuildForYahoo(sym: string, force: boolean = false) 
 
     const files = fs.readdirSync(candleDir).filter((f) => f.endsWith('.jsonl')).sort()
     
-    // Load ALL 1m candles first
+    // MEMORY FIX: Limit candles loaded to prevent 88GB memory explosion
+    // Only load last 90 days of data (129,600 1m candles max)
+    const MAX_FILES = 90
+    const sortedFiles = files.slice(-MAX_FILES) // Take most recent files only
+    
     const all1mCandles: Candle[] = []
-    for (const f of files) {
+    for (const f of sortedFiles) {
       if (derivedRebuildStop || shuttingDown) break
       const filePath = path.join(candleDir, f)
       const candles = readCandlesFromFile(filePath)
@@ -2173,7 +2181,7 @@ async function startDerivedRebuildForYahoo(sym: string, force: boolean = false) 
       progress.baseCandlesProcessed = (progress.baseCandlesProcessed ?? 0) + candles.length
     }
     all1mCandles.sort((a, b) => a.openTime - b.openTime)
-    console.log(`[Engine] Yahoo ${symLower}: Loaded ${all1mCandles.length} 1m candles`)
+    console.log(`[Engine] Yahoo ${symLower}: Loaded ${all1mCandles.length} 1m candles (limited to ${MAX_FILES} days)`)
 
     // Define all timeframes to generate (including 1m for swings)
     const yahooTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d']
@@ -2934,8 +2942,10 @@ async function autoStartPipeline() {
   console.log(`[Engine] Exchange ID: ${exchangeId}`)
 
   // PHASE 1: Run derived rebuild for any existing candle data (generates swings immediately)
+  // MEMORY FIX: Process one symbol at a time with delays to allow GC
   console.log('[Engine] PHASE 1: Generating swings from existing crypto candle data...')
   for (const sym of cryptoSymbols) {
+    console.log(`[Engine] Processing symbol: ${sym}`)
     for (const tf of allTimeframes) {
       if (shuttingDown) return
       try {
@@ -2950,7 +2960,13 @@ async function autoStartPipeline() {
       } catch (err) {
         console.error(`[Engine] Error processing ${sym}/${tf}:`, err)
       }
+      // MEMORY FIX: Small delay between timeframes to allow GC
+      await new Promise(r => setTimeout(r, 100))
     }
+    // MEMORY FIX: Larger delay between symbols to allow GC
+    console.log(`[Engine] Completed ${sym}, pausing for memory cleanup...`)
+    await new Promise(r => setTimeout(r, 2000))
+    if (global.gc) global.gc() // Hint to V8 garbage collector if exposed
   }
   console.log('[Engine] PHASE 1 complete. Swings generated from existing data.')
 

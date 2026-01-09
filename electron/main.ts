@@ -685,6 +685,12 @@ app.whenReady().then(() => {
   
   function recordSignal(signal: SignalRecord): void {
     signalLog.unshift(signal)
+    
+    // MEMORY FIX: Trim immediately on insert, not just on save
+    if (signalLog.length > 200) {
+      signalLog = signalLog.slice(0, 200)
+    }
+    
     signalStats.totalSignals++
     
     if (signal.confluenceScore >= signal.minConfluenceRequired) {
@@ -701,13 +707,15 @@ app.whenReady().then(() => {
       signalStats.blockedReasons[signal.blockReason] = (signalStats.blockedReasons[signal.blockReason] || 0) + 1
     }
     
-    // Save every 10 signals to reduce disk writes
-    if (signalStats.totalSignals % 10 === 0) {
+    // Save every 50 signals to reduce disk writes
+    if (signalStats.totalSignals % 50 === 0) {
       saveSignalLog()
     }
     
-    // Send to UI
-    mainWindow?.webContents.send('trader:signalLog', { signal, stats: signalStats })
+    // Send to UI (throttled - only every 5th signal)
+    if (signalStats.totalSignals % 5 === 0) {
+      mainWindow?.webContents.send('trader:signalLog', { signal, stats: signalStats })
+    }
   }
   
   // Load signal log on init
