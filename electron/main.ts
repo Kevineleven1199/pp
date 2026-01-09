@@ -230,7 +230,7 @@ function stopEngine() {
 
 // Direct data scanning function - bypasses IPC for initial status
 function scanDataDirectory(dataDir: string): Partial<EngineStatus> {
-  const cryptoSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'dogeusdt', 'xrpusdt']
+  const cryptoSymbols = ['btcusdt', 'ethusdt', 'ethbtc', 'solusdt', 'dogeusdt', 'xrpusdt']
   const yahooSymbols = ['spy', 'nq', 'gc', 'cl']
   const timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d']
   const exchangeId = 'binance'

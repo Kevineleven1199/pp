@@ -631,7 +631,7 @@ function getDirSizeBytes(dirPath: string): number {
 
 // Scan actual data on disk for all symbols and timeframes with detailed counts
 function scanDataStatuses(): { statuses: DataStatus[], totalSizeBytes: number } {
-  const cryptoSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'dogeusdt', 'xrpusdt']
+  const cryptoSymbols = ['btcusdt', 'ethusdt', 'ethbtc', 'solusdt', 'dogeusdt', 'xrpusdt']
   const yahooSymbols = ['spy', 'nq', 'gc', 'cl'] // SPY, NQ futures, Gold, Crude Oil
   const timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d']
   const results: DataStatus[] = []
@@ -2926,7 +2926,7 @@ async function autoStartPipeline() {
   console.log('[Engine] PHASE 0 complete. Yahoo/TradFi symbols processed.')
 
   // Crypto symbols from Binance - ALL timeframes
-  const cryptoSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'dogeusdt', 'xrpusdt']
+  const cryptoSymbols = ['btcusdt', 'ethusdt', 'ethbtc', 'solusdt', 'dogeusdt', 'xrpusdt']
   const allTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d']
 
   console.log(`[Engine] Starting full data pipeline for ${cryptoSymbols.length} symbols × ${allTimeframes.length} timeframes = ${cryptoSymbols.length * allTimeframes.length} jobs`)
