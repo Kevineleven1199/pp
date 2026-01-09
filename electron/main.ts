@@ -1484,6 +1484,149 @@ Respond in JSON ONLY:
   let lastKnownPrice = 0
   
   // ═══════════════════════════════════════════════════════════════════
+  // SMART RE-ENTRY LOGIC - Uses real market data, not arbitrary cooldowns
+  // ═══════════════════════════════════════════════════════════════════
+  const reentryState = {
+    lastExitTime: 0,
+    lastExitPrice: 0,
+    lastExitPnl: 0,
+    lastExitSide: null as 'long' | 'short' | null,
+    recentHigh: 0,           // Highest price in last N minutes
+    recentLow: Infinity,     // Lowest price in last N minutes
+    recentHighTime: 0,
+    recentLowTime: 0,
+    priceAtExit: 0,
+    consecutiveLosses: 0,
+    priceMoveSinceExit: 0,   // % move since last exit
+    structureScore: 0        // Market structure quality score
+  }
+  
+  // Track recent price extremes (rolling 5-minute window)
+  const priceExtremes: { price: number; time: number }[] = []
+  const EXTREME_WINDOW_MS = 5 * 60 * 1000 // 5 minutes
+  
+  function updatePriceExtremes(price: number): void {
+    const now = Date.now()
+    priceExtremes.push({ price, time: now })
+    
+    // Remove old entries
+    while (priceExtremes.length > 0 && priceExtremes[0].time < now - EXTREME_WINDOW_MS) {
+      priceExtremes.shift()
+    }
+    
+    // Calculate recent high/low
+    if (priceExtremes.length > 0) {
+      reentryState.recentHigh = Math.max(...priceExtremes.map(p => p.price))
+      reentryState.recentLow = Math.min(...priceExtremes.map(p => p.price))
+      
+      const highEntry = priceExtremes.find(p => p.price === reentryState.recentHigh)
+      const lowEntry = priceExtremes.find(p => p.price === reentryState.recentLow)
+      if (highEntry) reentryState.recentHighTime = highEntry.time
+      if (lowEntry) reentryState.recentLowTime = lowEntry.time
+    }
+  }
+  
+  function recordTradeExit(exitPrice: number, pnl: number, side: 'long' | 'short'): void {
+    reentryState.lastExitTime = Date.now()
+    reentryState.lastExitPrice = exitPrice
+    reentryState.lastExitPnl = pnl
+    reentryState.lastExitSide = side
+    reentryState.priceAtExit = exitPrice
+    
+    if (pnl < 0) {
+      reentryState.consecutiveLosses++
+    } else {
+      reentryState.consecutiveLosses = 0
+    }
+    
+    console.log(`[SmartEntry] Exit recorded: ${side} @ $${exitPrice.toFixed(2)}, PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%, Consecutive losses: ${reentryState.consecutiveLosses}`)
+  }
+  
+  function shouldAllowReentry(currentPrice: number, intendedSide: 'long' | 'short'): { allowed: boolean; reason: string } {
+    const now = Date.now()
+    const timeSinceExit = now - reentryState.lastExitTime
+    
+    // First trade ever - allow it
+    if (reentryState.lastExitTime === 0) {
+      return { allowed: true, reason: 'First trade' }
+    }
+    
+    // Calculate price move since exit
+    const priceMovePercent = ((currentPrice - reentryState.lastExitPrice) / reentryState.lastExitPrice) * 100
+    reentryState.priceMoveSinceExit = priceMovePercent
+    
+    // Calculate distance from recent extremes
+    const distanceFromHigh = ((reentryState.recentHigh - currentPrice) / currentPrice) * 100
+    const distanceFromLow = ((currentPrice - reentryState.recentLow) / currentPrice) * 100
+    const timeSinceHigh = now - reentryState.recentHighTime
+    const timeSinceLow = now - reentryState.recentLowTime
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 1: After a LOSS, require price to move meaningfully before re-entry
+    // ═══════════════════════════════════════════════════════════════════
+    if (reentryState.lastExitPnl < 0) {
+      const requiredMove = 0.15 + (reentryState.consecutiveLosses * 0.1) // 0.15% + 0.1% per consecutive loss
+      
+      if (intendedSide === 'long' && priceMovePercent > -requiredMove && priceMovePercent < requiredMove) {
+        return { allowed: false, reason: `After loss: need ${requiredMove.toFixed(2)}% move, only ${Math.abs(priceMovePercent).toFixed(2)}%` }
+      }
+      if (intendedSide === 'short' && priceMovePercent < requiredMove && priceMovePercent > -requiredMove) {
+        return { allowed: false, reason: `After loss: need ${requiredMove.toFixed(2)}% move, only ${Math.abs(priceMovePercent).toFixed(2)}%` }
+      }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 2: Don't LONG near recent high (within 0.1% and high was recent)
+    // ═══════════════════════════════════════════════════════════════════
+    if (intendedSide === 'long' && distanceFromHigh < 0.1 && timeSinceHigh < 60000) {
+      return { allowed: false, reason: `Too close to recent high ($${reentryState.recentHigh.toFixed(2)}, ${(timeSinceHigh/1000).toFixed(0)}s ago)` }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 3: Don't SHORT near recent low (within 0.1% and low was recent)
+    // ═══════════════════════════════════════════════════════════════════
+    if (intendedSide === 'short' && distanceFromLow < 0.1 && timeSinceLow < 60000) {
+      return { allowed: false, reason: `Too close to recent low ($${reentryState.recentLow.toFixed(2)}, ${(timeSinceLow/1000).toFixed(0)}s ago)` }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 4: After profitable exit at HIGH, don't re-long until pullback
+    // ═══════════════════════════════════════════════════════════════════
+    if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'long') {
+      // We just sold at a profit - price likely near a local top
+      const pullbackRequired = 0.2 // Need 0.2% pullback before re-longing
+      if (priceMovePercent > -pullbackRequired) {
+        return { allowed: false, reason: `Waiting for pullback: need -${pullbackRequired}% from exit, currently ${priceMovePercent.toFixed(2)}%` }
+      }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 5: After profitable exit at LOW, don't re-short until bounce
+    // ═══════════════════════════════════════════════════════════════════
+    if (reentryState.lastExitPnl > 0 && reentryState.lastExitSide === 'short') {
+      const bounceRequired = 0.2 // Need 0.2% bounce before re-shorting
+      if (priceMovePercent < bounceRequired) {
+        return { allowed: false, reason: `Waiting for bounce: need +${bounceRequired}% from exit, currently ${priceMovePercent.toFixed(2)}%` }
+      }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RULE 6: After 3+ consecutive losses, require stronger confirmation
+    // ═══════════════════════════════════════════════════════════════════
+    if (reentryState.consecutiveLosses >= 3) {
+      const requiredMove = 0.5 // Need 0.5% move in intended direction
+      if (intendedSide === 'long' && priceMovePercent < requiredMove) {
+        return { allowed: false, reason: `${reentryState.consecutiveLosses} losses: need +${requiredMove}% confirmation, only ${priceMovePercent.toFixed(2)}%` }
+      }
+      if (intendedSide === 'short' && priceMovePercent > -requiredMove) {
+        return { allowed: false, reason: `${reentryState.consecutiveLosses} losses: need -${requiredMove}% confirmation, only ${priceMovePercent.toFixed(2)}%` }
+      }
+    }
+    
+    return { allowed: true, reason: 'All checks passed' }
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
   // PYRAMID STRATEGY STATE
   // ═══════════════════════════════════════════════════════════════════
   let pyramidState = {
@@ -1539,6 +1682,9 @@ Respond in JSON ONLY:
     
     // Update live candle collector
     updateLiveCandle(price, Date.now())
+    
+    // Update price extremes for smart re-entry
+    updatePriceExtremes(price)
   }
   
   // ═══════════════════════════════════════════════════════════════════
@@ -2216,6 +2362,15 @@ Respond in JSON:
   async function closeAllPositions(): Promise<void> {
     if (!traderApiKey || !traderApiSecret) return
     
+    // Capture position info before closing for smart re-entry tracking
+    const exitSide = currentPosition.side
+    const exitPrice = lastKnownPrice
+    const pnlPercent = currentPosition.entryPrice > 0 && exitSide
+      ? (exitSide === 'long' 
+          ? ((exitPrice - currentPosition.entryPrice) / currentPosition.entryPrice) * 100
+          : ((currentPosition.entryPrice - exitPrice) / currentPosition.entryPrice) * 100)
+      : 0
+    
     try {
       const positions = await asterDexRequest('GET', '/fapi/v2/positionRisk', { symbol: SYMBOL }) as Array<{ positionAmt: string; positionSide: string }>
       
@@ -2236,6 +2391,11 @@ Respond in JSON:
           type: 'MARKET',
           quantity: closeQty
         })
+      }
+      
+      // Record exit for smart re-entry logic
+      if (exitSide) {
+        recordTradeExit(exitPrice, pnlPercent, exitSide)
       }
       
       currentPosition = { side: null, size: 0, entryPrice: 0, unrealizedPnl: 0 }
@@ -2386,41 +2546,67 @@ Respond in JSON:
         // Determine direction based on momentum
         const tradeSide: 'long' | 'short' = priceTrend === 'bearish' ? 'short' : 'long'
         
-        // Calculate position size: use minimum 25% for small accounts, cap at $10 for safety
-        const riskAmount = lastKnownBalance.availableBalance * Math.max(baseRiskPercent, 25) / 100
-        const marginUsd = Math.min(riskAmount, lastKnownBalance.availableBalance * 0.5, 10)
-        
-        console.log(`[Trader] Position sizing: balance=$${lastKnownBalance.availableBalance.toFixed(2)} risk%=${baseRiskPercent} margin=$${marginUsd.toFixed(2)}`)
-        
-        if (marginUsd >= 1) {
-          console.log(`[Trader] ═══════════════════════════════════════════════`)
-          console.log(`[Trader] AUTO ENTRY: ${tradeSide.toUpperCase()} $${marginUsd.toFixed(2)} @ confluence ${confluenceScore}`)
-          console.log(`[Trader] Factors: ${confluenceFactors.join(', ')}`)
-          console.log(`[Trader] ═══════════════════════════════════════════════`)
+        // ═══════════════════════════════════════════════════════════════════
+        // SMART RE-ENTRY CHECK - Use real market data, not arbitrary cooldowns
+        // ═══════════════════════════════════════════════════════════════════
+        const reentryCheck = shouldAllowReentry(price, tradeSide)
+        if (!reentryCheck.allowed) {
+          console.log(`[SmartEntry] ⛔ BLOCKED: ${reentryCheck.reason}`)
+          console.log(`[SmartEntry] Recent high: $${reentryState.recentHigh.toFixed(2)}, Recent low: $${reentryState.recentLow.toFixed(2)}`)
+          recordSignal({
+            id: `smartentry-${Date.now()}`,
+            timestamp: Date.now(),
+            price,
+            action: 'BLOCKED',
+            confluenceScore,
+            confluenceFactors,
+            minConfluenceRequired: minConfluenceToEnter,
+            hasPosition: !!currentPosition.side,
+            positionSide: currentPosition.side || undefined,
+            circuitBreakerTripped,
+            autoTradingEnabled: enableAutoTrading,
+            hasApiKeys: !!(traderApiKey && traderApiSecret),
+            availableBalance: lastKnownBalance.availableBalance,
+            blockReason: `SmartEntry: ${reentryCheck.reason}`
+          })
+          // Skip this trade attempt
+        } else {
+          // Calculate position size: use minimum 25% for small accounts, cap at $10 for safety
+          const riskAmount = lastKnownBalance.availableBalance * Math.max(baseRiskPercent, 25) / 100
+          const marginUsd = Math.min(riskAmount, lastKnownBalance.availableBalance * 0.5, 10)
           
-          try {
-            const result = await executeTrade(tradeSide, marginUsd)
-            if (result.success) {
-              mainWindow?.webContents.send('trader:trade', {
-                id: `auto-${Date.now()}`,
-                action: tradeSide === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
-                side: tradeSide,
-                marginUsd,
-                price,
-                quantity: result.quantity,
-                status: 'filled',
-                timestamp: Date.now(),
-                confluence: confluenceScore,
-                factors: confluenceFactors
-              })
-              traderPerformance.totalTrades++
+          console.log(`[Trader] Position sizing: balance=$${lastKnownBalance.availableBalance.toFixed(2)} risk%=${baseRiskPercent} margin=$${marginUsd.toFixed(2)}`)
+          console.log(`[SmartEntry] ✓ Re-entry allowed: ${reentryCheck.reason}`)
+          
+          if (marginUsd >= 1) {
+            console.log(`[Trader] ═══════════════════════════════════════════════`)
+            console.log(`[Trader] AUTO ENTRY: ${tradeSide.toUpperCase()} $${marginUsd.toFixed(2)} @ confluence ${confluenceScore}`)
+            console.log(`[Trader] Factors: ${confluenceFactors.join(', ')}`)
+            console.log(`[Trader] ═══════════════════════════════════════════════`)
+          
+            try {
+              const result = await executeTrade(tradeSide, marginUsd)
+              if (result.success) {
+                mainWindow?.webContents.send('trader:trade', {
+                  id: `auto-${Date.now()}`,
+                  action: tradeSide === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
+                  side: tradeSide,
+                  marginUsd,
+                  price,
+                  quantity: result.quantity,
+                  status: 'filled',
+                  timestamp: Date.now(),
+                  confluence: confluenceScore
+                })
+                traderPerformance.totalTrades++
+              }
+            } catch (err: any) {
+              console.error(`[Trader] Auto entry failed:`, err.message)
+              consecutiveErrors++
             }
-          } catch (err: any) {
-            console.error(`[Trader] Auto entry failed:`, err.message)
-            consecutiveErrors++
           }
-        }
-      }
+        } // end else (reentry allowed)
+      } // end if (enableAutoTrading...)
       
       // Auto-exit on momentum reversal against position
       if (currentPosition.side && priceTrend !== 'neutral') {
