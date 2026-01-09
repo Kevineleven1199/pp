@@ -25,13 +25,20 @@ const DEFAULT_SETTINGS: ApiSettings = {
 }
 
 const OPENROUTER_MODELS = [
-  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet (Recommended)' },
-  { id: 'anthropic/claude-3-opus', name: 'Claude 3 Opus' },
-  { id: 'openai/gpt-4-turbo', name: 'GPT-4 Turbo' },
+  { id: 'openrouter/auto', name: '🔄 Auto (Use Your OpenRouter Default)' },
+  { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4 (Latest)' },
+  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
+  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku (Fast)' },
   { id: 'openai/gpt-4o', name: 'GPT-4o' },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini (Fast)' },
+  { id: 'openai/o1', name: 'OpenAI o1 (Reasoning)' },
+  { id: 'openai/o1-mini', name: 'OpenAI o1 Mini' },
+  { id: 'google/gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash' },
   { id: 'google/gemini-pro-1.5', name: 'Gemini Pro 1.5' },
-  { id: 'meta-llama/llama-3.1-405b-instruct', name: 'Llama 3.1 405B' },
-  { id: 'mistralai/mistral-large', name: 'Mistral Large' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 (Cheap & Good)' },
+  { id: 'mistralai/mistral-large-2411', name: 'Mistral Large 2411' },
+  { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B' },
 ]
 
 export default function SettingsPage() {

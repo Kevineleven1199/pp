@@ -916,9 +916,110 @@ app.whenReady().then(() => {
   }
   
   // AI Market Analysis using OpenRouter
-  async function analyzeMarketWithAI(snapshot: MarketSnapshot, recentJournal: JournalEntry[]): Promise<{ analysis: string; patterns: string[]; recommendation: string; confidence: number; insight: string }> {
+  // ═══════════════════════════════════════════════════════════════════
+  // AI JOURNAL & LEARNING SYSTEM - Comprehensive market intelligence
+  // ═══════════════════════════════════════════════════════════════════
+  
+  // AI Action Journal - detailed log for manual review
+  interface AIActionLog {
+    timestamp: number
+    action: string
+    details: string
+    apiCalls: number
+    latencyMs: number
+    success: boolean
+    error?: string
+  }
+  const aiActionJournal: AIActionLog[] = []
+  const aiJournalFile = path.join(traderDataDir, 'ai-action-journal.json')
+  
+  function logAIAction(action: string, details: string, apiCalls: number, latencyMs: number, success: boolean, error?: string): void {
+    const entry: AIActionLog = { timestamp: Date.now(), action, details, apiCalls, latencyMs, success, error }
+    aiActionJournal.unshift(entry)
+    if (aiActionJournal.length > 500) aiActionJournal.pop()
+    
+    // Save to disk periodically
+    try {
+      fs.writeFileSync(aiJournalFile, JSON.stringify(aiActionJournal.slice(0, 200), null, 2), 'utf-8')
+    } catch {}
+    
+    console.log(`[AI-Journal] ${action}: ${details.slice(0, 100)}${details.length > 100 ? '...' : ''} | API: ${apiCalls} | ${latencyMs}ms | ${success ? '✓' : '✗'}`)
+  }
+  
+  // Price Breakout Pattern Learning
+  interface PriceBreakoutPattern {
+    level: number  // e.g., 3100, 3150, 3200
+    breakthroughCount: number
+    rejectionCount: number
+    avgTimeToBreak: number
+    lastUpdate: number
+  }
+  const priceBreakoutPatterns: Map<number, PriceBreakoutPattern> = new Map()
+  const breakoutPatternsFile = path.join(traderDataDir, 'price-breakout-patterns.json')
+  
+  function loadBreakoutPatterns(): void {
+    try {
+      if (fs.existsSync(breakoutPatternsFile)) {
+        const data = JSON.parse(fs.readFileSync(breakoutPatternsFile, 'utf-8'))
+        for (const p of data) priceBreakoutPatterns.set(p.level, p)
+      }
+    } catch {}
+  }
+  loadBreakoutPatterns()
+  
+  function saveBreakoutPatterns(): void {
+    try {
+      fs.writeFileSync(breakoutPatternsFile, JSON.stringify(Array.from(priceBreakoutPatterns.values()), null, 2), 'utf-8')
+    } catch {}
+  }
+  
+  function trackPriceBreakout(price: number, previousPrice: number): void {
+    // Track $50 level breakouts
+    const currentLevel = Math.floor(price / 50) * 50
+    const previousLevel = Math.floor(previousPrice / 50) * 50
+    
+    if (currentLevel !== previousLevel) {
+      const targetLevel = price > previousPrice ? currentLevel : previousLevel
+      let pattern = priceBreakoutPatterns.get(targetLevel) || {
+        level: targetLevel,
+        breakthroughCount: 0,
+        rejectionCount: 0,
+        avgTimeToBreak: 0,
+        lastUpdate: Date.now()
+      }
+      
+      pattern.breakthroughCount++
+      pattern.lastUpdate = Date.now()
+      priceBreakoutPatterns.set(targetLevel, pattern)
+      
+      logAIAction('BREAKOUT_DETECTED', `Price broke through $${targetLevel} (${price > previousPrice ? 'UP' : 'DOWN'}). Total breaks: ${pattern.breakthroughCount}`, 0, 0, true)
+    }
+  }
+  
+  // Get selected OpenRouter model from localStorage
+  function getOpenRouterModel(): string {
+    try {
+      const settingsPath = path.join(app.getPath('userData'), 'settings.json')
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+        return settings.openRouterModel || 'openrouter/auto'
+      }
+    } catch {}
+    return 'openrouter/auto'
+  }
+  
+  async function analyzeMarketWithAI(snapshot: MarketSnapshot, recentJournal: JournalEntry[]): Promise<{ analysis: string; patterns: string[]; recommendation: string; confidence: number; insight: string; sentiment?: string; newsContext?: string }> {
+    const startTime = Date.now()
+    
+    // Get nearby $50 levels for context
+    const nearestFifty = Math.round(snapshot.price / 50) * 50
+    const levelAbove = nearestFifty + (snapshot.price > nearestFifty ? 50 : 0)
+    const levelBelow = nearestFifty - (snapshot.price < nearestFifty ? 50 : 0)
+    const patternAbove = priceBreakoutPatterns.get(levelAbove)
+    const patternBelow = priceBreakoutPatterns.get(levelBelow)
+    
     if (!OPENROUTER_API_KEY) {
-      // Fallback: rule-based analysis
+      // Enhanced rule-based fallback
       const patterns: string[] = []
       let recommendation = 'WAIT'
       let confidence = 50
@@ -930,6 +1031,11 @@ app.whenReady().then(() => {
       if (snapshot.volatility1h > 1) patterns.push('High 1h volatility')
       if (snapshot.spreadPercent < 0.01) patterns.push('Tight spread - good liquidity')
       
+      // Add breakout pattern context
+      if (patternAbove && patternAbove.breakthroughCount > 3) {
+        patterns.push(`$${levelAbove} broken ${patternAbove.breakthroughCount}x before`)
+      }
+      
       if (snapshot.imbalanceRatio > 0.6 && snapshot.priceChange1h > 0) {
         recommendation = 'LONG'
         confidence = 65
@@ -937,6 +1043,8 @@ app.whenReady().then(() => {
         recommendation = 'SHORT'
         confidence = 65
       }
+      
+      logAIAction('RULE_BASED_ANALYSIS', `No API key - using rule-based. Rec: ${recommendation} (${confidence}%)`, 0, Date.now() - startTime, true)
       
       return {
         analysis: `ETHUSDT at $${snapshot.price.toFixed(2)} during ${snapshot.session}. Orderbook ${snapshot.imbalanceRatio > 0.5 ? 'bid' : 'ask'}-heavy (${(snapshot.imbalanceRatio * 100).toFixed(0)}%). Funding: ${snapshot.fundingRate.toFixed(4)}%. 24h vol: $${(snapshot.volume24h / 1e6).toFixed(1)}M.`,
@@ -948,33 +1056,65 @@ app.whenReady().then(() => {
     }
     
     try {
-      const prompt = `You are an ETHUSDT perpetual futures specialist on AsterDEX (88x max leverage). Analyze this market snapshot and identify actionable patterns.
+      const model = getOpenRouterModel()
+      
+      const prompt = `You are an elite ETHUSDT perpetual futures specialist on AsterDEX (88x max leverage). Your job is to analyze market data, detect patterns, note any sentiment/news you're aware of, and provide actionable trading intelligence.
 
-CURRENT SNAPSHOT:
-- Price: $${snapshot.price.toFixed(2)}
-- Session: ${snapshot.session}
-- Time: ${snapshot.hourUTC}:00 UTC, Day ${snapshot.dayOfWeek} (0=Sun)
-- Orderbook: Bid depth $${(snapshot.bidDepth/1000).toFixed(1)}K, Ask depth $${(snapshot.askDepth/1000).toFixed(1)}K
-- Imbalance: ${(snapshot.imbalanceRatio * 100).toFixed(1)}% bid-heavy
+═══════════════════════════════════════════════════════════════
+CURRENT MARKET SNAPSHOT
+═══════════════════════════════════════════════════════════════
+Price: $${snapshot.price.toFixed(2)}
+Session: ${snapshot.session}
+Time: ${snapshot.hourUTC}:00 UTC, Day ${snapshot.dayOfWeek} (0=Sun, 1=Mon...)
+
+ORDERBOOK:
+- Bid depth: $${(snapshot.bidDepth/1000).toFixed(1)}K
+- Ask depth: $${(snapshot.askDepth/1000).toFixed(1)}K  
+- Imbalance: ${(snapshot.imbalanceRatio * 100).toFixed(1)}% ${snapshot.imbalanceRatio > 0.5 ? 'BID' : 'ASK'}-heavy
 - Spread: ${snapshot.spreadPercent.toFixed(4)}%
+
+FUNDING & VOLUME:
 - Funding Rate: ${snapshot.fundingRate.toFixed(4)}% (next in ${Math.round((snapshot.nextFundingTime - Date.now()) / 60000)} min)
-- 1h Price Change: ${snapshot.priceChange1h.toFixed(2)}%
-- 24h Price Change: ${snapshot.priceChange24h.toFixed(2)}%
 - 24h Volume: $${(snapshot.volume24h / 1e6).toFixed(1)}M
-- EMAs: 9=${snapshot.ema9.toFixed(2)}, 21=${snapshot.ema21.toFixed(2)}, 50=${snapshot.ema50.toFixed(2)}, 200=${snapshot.ema200.toFixed(2)}
+- 1h Change: ${snapshot.priceChange1h.toFixed(2)}%
+- 24h Change: ${snapshot.priceChange24h.toFixed(2)}%
 
-RECENT JOURNAL (last 4 entries):
-${recentJournal.slice(0, 4).map(j => `- ${new Date(j.timestamp).toISOString()}: ${j.recommendation} (${j.confidence}%) - ${j.patterns.join(', ')}`).join('\n')}
+TECHNICAL:
+- EMA9: $${snapshot.ema9.toFixed(2)} (${snapshot.price > snapshot.ema9 ? 'ABOVE' : 'BELOW'})
+- EMA21: $${snapshot.ema21.toFixed(2)} (${snapshot.price > snapshot.ema21 ? 'ABOVE' : 'BELOW'})
+- EMA50: $${snapshot.ema50.toFixed(2)} (${snapshot.price > snapshot.ema50 ? 'ABOVE' : 'BELOW'})
+- 1h Volatility: ${snapshot.volatility1h.toFixed(2)}%
 
-Respond in JSON format ONLY:
+PRICE LEVEL PATTERNS (from our database):
+- Next resistance: $${levelAbove} ${patternAbove ? `(broken ${patternAbove.breakthroughCount}x before)` : '(no data)'}
+- Next support: $${levelBelow} ${patternBelow ? `(broken ${patternBelow.breakthroughCount}x before)` : '(no data)'}
+
+RECENT AI JOURNAL:
+${recentJournal.slice(0, 5).map(j => `[${new Date(j.timestamp).toISOString().slice(11,16)}] ${j.recommendation} (${j.confidence}%) - ${j.analysis?.slice(0,80)}...`).join('\n')}
+
+═══════════════════════════════════════════════════════════════
+YOUR TASKS:
+═══════════════════════════════════════════════════════════════
+1. Analyze current market structure
+2. Note any market sentiment or news you're aware of (crypto news, macro events, tweets)
+3. Identify specific patterns (double tops, EMA crosses, breakout setups, etc.)
+4. Consider $50 price levels - ETH tends to test/break these
+5. Provide clear actionable recommendation
+
+Respond in JSON ONLY:
 {
-  "analysis": "Brief 2-3 sentence market analysis",
-  "patterns": ["pattern1", "pattern2"],
+  "analysis": "2-3 sentence market structure analysis",
+  "patterns": ["specific_pattern_1", "specific_pattern_2"],
   "recommendation": "LONG|SHORT|WAIT|CLOSE",
   "confidence": 0-100,
-  "insight": "One key insight about ETHUSDT behavior at this time/session"
+  "insight": "Key tactical insight for this specific moment",
+  "sentiment": "Brief note on any market sentiment/news you're aware of (or 'No notable news')",
+  "priceTargets": {"support": price, "resistance": price},
+  "confluenceImprovements": ["suggestion to improve our trading strategy"]
 }`
 
+      trackApiCall('openrouter/analyze', true, 0)
+      
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -984,32 +1124,65 @@ Respond in JSON format ONLY:
           'X-Title': 'Price Perfect ETHUSDT Specialist'
         },
         body: JSON.stringify({
-          model: 'anthropic/claude-3.5-sonnet',
+          model: model === 'openrouter/auto' ? undefined : model,
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: 500
+          max_tokens: 800
         })
       })
+      
+      const latency = Date.now() - startTime
+      
+      if (!response.ok) {
+        const errText = await response.text()
+        trackApiCall('openrouter/analyze', false, latency, errText)
+        logAIAction('API_ERROR', `OpenRouter returned ${response.status}: ${errText.slice(0, 100)}`, 1, latency, false, errText)
+        throw new Error(`OpenRouter error: ${response.status}`)
+      }
       
       const result = await response.json() as any
       const content = result.choices?.[0]?.message?.content || '{}'
       
       // Parse JSON response
       const parsed = JSON.parse(content.replace(/```json\n?|\n?```/g, ''))
+      
+      // Save confluence improvements to separate file for manual review
+      if (parsed.confluenceImprovements?.length > 0) {
+        const improvementsFile = path.join(traderDataDir, 'confluence-improvements.json')
+        const existing = fs.existsSync(improvementsFile) ? JSON.parse(fs.readFileSync(improvementsFile, 'utf-8')) : []
+        existing.unshift({
+          timestamp: Date.now(),
+          suggestions: parsed.confluenceImprovements,
+          context: `Price: $${snapshot.price}, Session: ${snapshot.session}`
+        })
+        if (existing.length > 100) existing.pop()
+        fs.writeFileSync(improvementsFile, JSON.stringify(existing, null, 2), 'utf-8')
+      }
+      
+      logAIAction('AI_ANALYSIS_COMPLETE', 
+        `Model: ${model} | Rec: ${parsed.recommendation} (${parsed.confidence}%) | Patterns: ${parsed.patterns?.join(', ')} | Sentiment: ${parsed.sentiment?.slice(0, 50)}`,
+        1, latency, true)
+      
       return {
         analysis: parsed.analysis || 'Analysis unavailable',
         patterns: parsed.patterns || [],
         recommendation: parsed.recommendation || 'WAIT',
         confidence: parsed.confidence || 50,
-        insight: parsed.insight || ''
+        insight: parsed.insight || '',
+        sentiment: parsed.sentiment,
+        newsContext: parsed.sentiment
       }
     } catch (err: any) {
+      const latency = Date.now() - startTime
+      trackApiCall('openrouter/analyze', false, latency, err.message)
+      logAIAction('AI_ANALYSIS_FAILED', err.message, 1, latency, false, err.message)
       console.error('[AI] OpenRouter error:', err.message)
+      
       return {
         analysis: 'AI analysis failed - using rule-based fallback',
         patterns: [],
         recommendation: 'WAIT',
         confidence: 30,
-        insight: ''
+        insight: err.message
       }
     }
   }
@@ -1558,7 +1731,15 @@ Respond in JSON:
   async function fetchPrice(): Promise<number> {
     try {
       const data = await asterDexRequest('GET', '/fapi/v1/ticker/price', { symbol: SYMBOL }, false)
-      lastKnownPrice = parseFloat(data.price)
+      const newPrice = parseFloat(data.price)
+      
+      // Track $50 level breakouts for pattern learning
+      if (lastKnownPrice > 0 && newPrice !== lastKnownPrice) {
+        trackPriceBreakout(newPrice, lastKnownPrice)
+        saveBreakoutPatterns()
+      }
+      
+      lastKnownPrice = newPrice
       return lastKnownPrice
     } catch (err) {
       return lastKnownPrice // Return last known on error
@@ -2285,6 +2466,26 @@ Respond in JSON:
         )
       }
     }
+  })
+  
+  // Get AI action journal for manual review
+  ipcMain.handle('trader:getAIJournal', async () => {
+    return {
+      actions: aiActionJournal.slice(0, 100),
+      breakoutPatterns: Array.from(priceBreakoutPatterns.values()),
+      totalActions: aiActionJournal.length
+    }
+  })
+  
+  // Get confluence improvement suggestions
+  ipcMain.handle('trader:getConfluenceImprovements', async () => {
+    try {
+      const improvementsFile = path.join(traderDataDir, 'confluence-improvements.json')
+      if (fs.existsSync(improvementsFile)) {
+        return JSON.parse(fs.readFileSync(improvementsFile, 'utf-8'))
+      }
+    } catch {}
+    return []
   })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets
