@@ -530,6 +530,23 @@ export default function PyramidPage() {
     notional: number
     side: 'long' | 'short' | null
   } | null>(null)
+  
+  // Market Intelligence from AI analysis
+  const [marketIntel, setMarketIntel] = useState<{
+    timestamp: number
+    analysis: string
+    patterns: string[]
+    recommendation: string
+    confidence: number
+    learnedInsight?: string
+    snapshot?: {
+      price: number
+      session: string
+      fundingRate: number
+      imbalanceRatio: number
+      volume24h: number
+    }
+  } | null>(null)
 
   // Load API settings - check both localStorage AND saved keys on disk
   useEffect(() => {
@@ -718,6 +735,18 @@ export default function PyramidPage() {
     const offPositionUpdate = (window as any).pricePerfect.trader?.on('positionUpdate', (pos: any) => {
       if (pos) setExtendedPosition(pos)
     })
+    
+    // Listen for market intelligence updates
+    const offMarketIntel = (window as any).pricePerfect.trader?.on('marketIntel', (intel: any) => {
+      if (intel) setMarketIntel(intel)
+    })
+    
+    // Load existing market journal on mount
+    ;(window as any).pricePerfect.trader?.getMarketJournal().then((journal: any[]) => {
+      if (journal && journal.length > 0) {
+        setMarketIntel(journal[0])
+      }
+    }).catch(() => {})
 
     return () => {
       offHealth?.()
@@ -728,6 +757,7 @@ export default function PyramidPage() {
       offHistoryUpdate?.()
       offSignalLog?.()
       offPositionUpdate?.()
+      offMarketIntel?.()
     }
   }, [livePrice])
 
@@ -1575,6 +1605,73 @@ export default function PyramidPage() {
           </div>
         )}
       </div>
+
+      {/* ETHUSDT Market Intelligence Panel */}
+      {marketIntel && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e2636', background: '#0a0f14' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: 1 }}>
+              🧠 ETHUSDT Market Intelligence
+            </div>
+            <div style={{ fontSize: 9, color: '#6b7785' }}>
+              Updated: {new Date(marketIntel.timestamp).toLocaleTimeString()}
+            </div>
+          </div>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+            {/* Analysis */}
+            <div>
+              <div style={{ fontSize: 11, color: '#e6eaf2', lineHeight: 1.5, marginBottom: 8 }}>
+                {marketIntel.analysis}
+              </div>
+              {marketIntel.patterns && marketIntel.patterns.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {marketIntel.patterns.map((p, i) => (
+                    <span key={i} style={{ 
+                      padding: '2px 6px', 
+                      background: '#1e2636', 
+                      borderRadius: 4, 
+                      fontSize: 9, 
+                      color: '#60a5fa'
+                    }}>
+                      {p}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {marketIntel.learnedInsight && (
+                <div style={{ marginTop: 8, fontSize: 10, color: '#9aa4b2', fontStyle: 'italic' }}>
+                  💡 {marketIntel.learnedInsight}
+                </div>
+              )}
+            </div>
+            
+            {/* Recommendation */}
+            <div style={{ 
+              padding: 12, 
+              background: marketIntel.recommendation === 'LONG' ? '#0a3622' : 
+                         marketIntel.recommendation === 'SHORT' ? '#3f1219' : '#1e2636',
+              borderRadius: 8,
+              border: `1px solid ${marketIntel.recommendation === 'LONG' ? '#22c55e' : 
+                                  marketIntel.recommendation === 'SHORT' ? '#ef4444' : '#3b82f6'}`,
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: 9, color: '#6b7785', marginBottom: 4 }}>AI RECOMMENDATION</div>
+              <div style={{ 
+                fontSize: 18, 
+                fontWeight: 700, 
+                color: marketIntel.recommendation === 'LONG' ? '#4ade80' : 
+                       marketIntel.recommendation === 'SHORT' ? '#fca5a5' : '#60a5fa'
+              }}>
+                {marketIntel.recommendation}
+              </div>
+              <div style={{ fontSize: 11, color: '#9aa4b2', marginTop: 4 }}>
+                {marketIntel.confidence}% confidence
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Signal Stats Panel - Shows why trades did/didn't happen */}
       {signalStats && (

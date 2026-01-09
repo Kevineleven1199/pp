@@ -742,6 +742,366 @@ app.whenReady().then(() => {
   let consecutiveErrors = 0
   let lastSuccessfulApi = Date.now()
   
+  // ═══════════════════════════════════════════════════════════════════
+  // ETHUSDT SPECIALIST AI - Market Intelligence & Pattern Learning
+  // ═══════════════════════════════════════════════════════════════════
+  const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || ''
+  const marketJournalFile = path.join(traderDataDir, 'ethusdt-journal.json')
+  const learnedPatternsFile = path.join(traderDataDir, 'ethusdt-patterns.json')
+  let marketAnalysisInterval: NodeJS.Timeout | null = null
+  
+  interface MarketSnapshot {
+    timestamp: number
+    price: number
+    session: string
+    dayOfWeek: number
+    hourUTC: number
+    
+    // Orderbook
+    bidDepth: number
+    askDepth: number
+    spreadPercent: number
+    imbalanceRatio: number
+    
+    // Volatility
+    volatility1h: number
+    volatility24h: number
+    priceChange1h: number
+    priceChange24h: number
+    
+    // Funding
+    fundingRate: number
+    nextFundingTime: number
+    
+    // Volume
+    volume24h: number
+    volumeChange: number
+    
+    // Technical
+    ema9: number
+    ema21: number
+    ema50: number
+    ema200: number
+    rsi14?: number
+  }
+  
+  interface JournalEntry {
+    timestamp: number
+    snapshot: MarketSnapshot
+    analysis: string
+    patterns: string[]
+    recommendation: 'LONG' | 'SHORT' | 'WAIT' | 'CLOSE'
+    confidence: number
+    learnedInsight?: string
+  }
+  
+  interface LearnedPattern {
+    id: string
+    name: string
+    description: string
+    conditions: string[]
+    successRate: number
+    occurrences: number
+    lastSeen: number
+    avgProfit: number
+  }
+  
+  let marketJournal: JournalEntry[] = []
+  let learnedPatterns: LearnedPattern[] = []
+  
+  function loadMarketJournal(): JournalEntry[] {
+    try {
+      if (fs.existsSync(marketJournalFile)) {
+        const data = fs.readFileSync(marketJournalFile, 'utf-8')
+        const entries = JSON.parse(data)
+        console.log(`[AI] Loaded ${entries.length} journal entries`)
+        return entries
+      }
+    } catch (err) {
+      console.error('[AI] Failed to load journal:', err)
+    }
+    return []
+  }
+  
+  function saveMarketJournal(): void {
+    try {
+      // Keep last 500 entries (about 5 days of 15-min intervals)
+      if (marketJournal.length > 500) {
+        marketJournal = marketJournal.slice(0, 500)
+      }
+      fs.writeFileSync(marketJournalFile, JSON.stringify(marketJournal, null, 2), 'utf-8')
+    } catch (err) {
+      console.error('[AI] Failed to save journal:', err)
+    }
+  }
+  
+  function loadLearnedPatterns(): LearnedPattern[] {
+    try {
+      if (fs.existsSync(learnedPatternsFile)) {
+        const data = fs.readFileSync(learnedPatternsFile, 'utf-8')
+        const patterns = JSON.parse(data)
+        console.log(`[AI] Loaded ${patterns.length} learned patterns`)
+        return patterns
+      }
+    } catch (err) {
+      console.error('[AI] Failed to load patterns:', err)
+    }
+    return []
+  }
+  
+  function saveLearnedPatterns(): void {
+    try {
+      fs.writeFileSync(learnedPatternsFile, JSON.stringify(learnedPatterns, null, 2), 'utf-8')
+    } catch (err) {
+      console.error('[AI] Failed to save patterns:', err)
+    }
+  }
+  
+  // Fetch orderbook depth
+  async function fetchOrderbook(): Promise<{ bidDepth: number; askDepth: number; spread: number; imbalance: number }> {
+    try {
+      const data = await asterDexRequest('GET', '/fapi/v1/depth', { symbol: SYMBOL, limit: 20 }, false)
+      const bids = data.bids || []
+      const asks = data.asks || []
+      
+      let bidDepth = 0, askDepth = 0
+      for (const [price, qty] of bids) bidDepth += parseFloat(price) * parseFloat(qty)
+      for (const [price, qty] of asks) askDepth += parseFloat(price) * parseFloat(qty)
+      
+      const bestBid = bids[0] ? parseFloat(bids[0][0]) : 0
+      const bestAsk = asks[0] ? parseFloat(asks[0][0]) : 0
+      const spread = bestAsk > 0 ? ((bestAsk - bestBid) / bestAsk) * 100 : 0
+      const imbalance = (bidDepth + askDepth) > 0 ? bidDepth / (bidDepth + askDepth) : 0.5
+      
+      return { bidDepth, askDepth, spread, imbalance }
+    } catch (err) {
+      return { bidDepth: 0, askDepth: 0, spread: 0, imbalance: 0.5 }
+    }
+  }
+  
+  // Fetch funding rate
+  async function fetchFundingRate(): Promise<{ rate: number; nextTime: number }> {
+    try {
+      const data = await asterDexRequest('GET', '/fapi/v1/premiumIndex', { symbol: SYMBOL }, false)
+      return {
+        rate: parseFloat(data.lastFundingRate || '0') * 100,
+        nextTime: parseInt(data.nextFundingTime || '0')
+      }
+    } catch (err) {
+      return { rate: 0, nextTime: 0 }
+    }
+  }
+  
+  // Fetch 24h stats
+  async function fetch24hStats(): Promise<{ volume: number; priceChange: number; high: number; low: number }> {
+    try {
+      const data = await asterDexRequest('GET', '/fapi/v1/ticker/24hr', { symbol: SYMBOL }, false)
+      return {
+        volume: parseFloat(data.quoteVolume || '0'),
+        priceChange: parseFloat(data.priceChangePercent || '0'),
+        high: parseFloat(data.highPrice || '0'),
+        low: parseFloat(data.lowPrice || '0')
+      }
+    } catch (err) {
+      return { volume: 0, priceChange: 0, high: 0, low: 0 }
+    }
+  }
+  
+  // AI Market Analysis using OpenRouter
+  async function analyzeMarketWithAI(snapshot: MarketSnapshot, recentJournal: JournalEntry[]): Promise<{ analysis: string; patterns: string[]; recommendation: string; confidence: number; insight: string }> {
+    if (!OPENROUTER_API_KEY) {
+      // Fallback: rule-based analysis
+      const patterns: string[] = []
+      let recommendation = 'WAIT'
+      let confidence = 50
+      
+      if (snapshot.imbalanceRatio > 0.6) patterns.push('Bid-heavy orderbook')
+      if (snapshot.imbalanceRatio < 0.4) patterns.push('Ask-heavy orderbook')
+      if (snapshot.fundingRate > 0.01) patterns.push('High funding (longs paying)')
+      if (snapshot.fundingRate < -0.01) patterns.push('Negative funding (shorts paying)')
+      if (snapshot.volatility1h > 1) patterns.push('High 1h volatility')
+      if (snapshot.spreadPercent < 0.01) patterns.push('Tight spread - good liquidity')
+      
+      if (snapshot.imbalanceRatio > 0.6 && snapshot.priceChange1h > 0) {
+        recommendation = 'LONG'
+        confidence = 65
+      } else if (snapshot.imbalanceRatio < 0.4 && snapshot.priceChange1h < 0) {
+        recommendation = 'SHORT'
+        confidence = 65
+      }
+      
+      return {
+        analysis: `ETHUSDT at $${snapshot.price.toFixed(2)} during ${snapshot.session}. Orderbook ${snapshot.imbalanceRatio > 0.5 ? 'bid' : 'ask'}-heavy (${(snapshot.imbalanceRatio * 100).toFixed(0)}%). Funding: ${snapshot.fundingRate.toFixed(4)}%. 24h vol: $${(snapshot.volume24h / 1e6).toFixed(1)}M.`,
+        patterns,
+        recommendation,
+        confidence,
+        insight: `Session: ${snapshot.session}, Hour: ${snapshot.hourUTC}UTC, Day: ${snapshot.dayOfWeek}`
+      }
+    }
+    
+    try {
+      const prompt = `You are an ETHUSDT perpetual futures specialist on AsterDEX (88x max leverage). Analyze this market snapshot and identify actionable patterns.
+
+CURRENT SNAPSHOT:
+- Price: $${snapshot.price.toFixed(2)}
+- Session: ${snapshot.session}
+- Time: ${snapshot.hourUTC}:00 UTC, Day ${snapshot.dayOfWeek} (0=Sun)
+- Orderbook: Bid depth $${(snapshot.bidDepth/1000).toFixed(1)}K, Ask depth $${(snapshot.askDepth/1000).toFixed(1)}K
+- Imbalance: ${(snapshot.imbalanceRatio * 100).toFixed(1)}% bid-heavy
+- Spread: ${snapshot.spreadPercent.toFixed(4)}%
+- Funding Rate: ${snapshot.fundingRate.toFixed(4)}% (next in ${Math.round((snapshot.nextFundingTime - Date.now()) / 60000)} min)
+- 1h Price Change: ${snapshot.priceChange1h.toFixed(2)}%
+- 24h Price Change: ${snapshot.priceChange24h.toFixed(2)}%
+- 24h Volume: $${(snapshot.volume24h / 1e6).toFixed(1)}M
+- EMAs: 9=${snapshot.ema9.toFixed(2)}, 21=${snapshot.ema21.toFixed(2)}, 50=${snapshot.ema50.toFixed(2)}, 200=${snapshot.ema200.toFixed(2)}
+
+RECENT JOURNAL (last 4 entries):
+${recentJournal.slice(0, 4).map(j => `- ${new Date(j.timestamp).toISOString()}: ${j.recommendation} (${j.confidence}%) - ${j.patterns.join(', ')}`).join('\n')}
+
+Respond in JSON format ONLY:
+{
+  "analysis": "Brief 2-3 sentence market analysis",
+  "patterns": ["pattern1", "pattern2"],
+  "recommendation": "LONG|SHORT|WAIT|CLOSE",
+  "confidence": 0-100,
+  "insight": "One key insight about ETHUSDT behavior at this time/session"
+}`
+
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://priceperfect.app',
+          'X-Title': 'Price Perfect ETHUSDT Specialist'
+        },
+        body: JSON.stringify({
+          model: 'anthropic/claude-3.5-sonnet',
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 500
+        })
+      })
+      
+      const result = await response.json() as any
+      const content = result.choices?.[0]?.message?.content || '{}'
+      
+      // Parse JSON response
+      const parsed = JSON.parse(content.replace(/```json\n?|\n?```/g, ''))
+      return {
+        analysis: parsed.analysis || 'Analysis unavailable',
+        patterns: parsed.patterns || [],
+        recommendation: parsed.recommendation || 'WAIT',
+        confidence: parsed.confidence || 50,
+        insight: parsed.insight || ''
+      }
+    } catch (err: any) {
+      console.error('[AI] OpenRouter error:', err.message)
+      return {
+        analysis: 'AI analysis failed - using rule-based fallback',
+        patterns: [],
+        recommendation: 'WAIT',
+        confidence: 30,
+        insight: ''
+      }
+    }
+  }
+  
+  // Main market analysis function - runs every 15 minutes
+  async function runMarketAnalysis(): Promise<void> {
+    console.log('[AI] ═══════════════════════════════════════════════════════════')
+    console.log('[AI] Running ETHUSDT Market Intelligence Analysis...')
+    
+    try {
+      // Gather market data
+      const price = await fetchPrice()
+      const orderbook = await fetchOrderbook()
+      const funding = await fetchFundingRate()
+      const stats24h = await fetch24hStats()
+      
+      const now = new Date()
+      const utcHour = now.getUTCHours()
+      const dayOfWeek = now.getUTCDay()
+      
+      // Determine session
+      const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5
+      const nyseOpen = isWeekday && (utcHour > 14 || (utcHour === 14)) && utcHour < 21
+      const londonOpen = isWeekday && utcHour >= 8 && utcHour < 17
+      const tokyoOpen = utcHour >= 0 && utcHour < 9
+      
+      let session = 'Off-Hours'
+      if (nyseOpen && londonOpen) session = 'NYSE+London Overlap'
+      else if (nyseOpen) session = 'NYSE Session'
+      else if (londonOpen) session = 'London Session'
+      else if (tokyoOpen) session = 'Tokyo Session'
+      
+      // Calculate volatility from price history
+      const volatility1h = pyramidState.priceHistory.length > 12
+        ? (Math.max(...pyramidState.priceHistory.slice(-12)) - Math.min(...pyramidState.priceHistory.slice(-12))) / price * 100
+        : 0
+      
+      const snapshot: MarketSnapshot = {
+        timestamp: Date.now(),
+        price,
+        session,
+        dayOfWeek,
+        hourUTC: utcHour,
+        bidDepth: orderbook.bidDepth,
+        askDepth: orderbook.askDepth,
+        spreadPercent: orderbook.spread,
+        imbalanceRatio: orderbook.imbalance,
+        volatility1h,
+        volatility24h: Math.abs(stats24h.priceChange),
+        priceChange1h: pyramidState.priceHistory.length > 12 
+          ? ((price - pyramidState.priceHistory[pyramidState.priceHistory.length - 12]) / pyramidState.priceHistory[pyramidState.priceHistory.length - 12]) * 100 
+          : 0,
+        priceChange24h: stats24h.priceChange,
+        fundingRate: funding.rate,
+        nextFundingTime: funding.nextTime,
+        volume24h: stats24h.volume,
+        volumeChange: 0,
+        ema9: pyramidState.ema9,
+        ema21: pyramidState.ema21,
+        ema50: pyramidState.ema50,
+        ema200: pyramidState.ema200
+      }
+      
+      // Run AI analysis
+      const aiResult = await analyzeMarketWithAI(snapshot, marketJournal.slice(0, 4))
+      
+      const entry: JournalEntry = {
+        timestamp: Date.now(),
+        snapshot,
+        analysis: aiResult.analysis,
+        patterns: aiResult.patterns,
+        recommendation: aiResult.recommendation as any,
+        confidence: aiResult.confidence,
+        learnedInsight: aiResult.insight
+      }
+      
+      marketJournal.unshift(entry)
+      saveMarketJournal()
+      
+      console.log(`[AI] Price: $${price.toFixed(2)} | Session: ${session}`)
+      console.log(`[AI] Orderbook: Bid $${(orderbook.bidDepth/1000).toFixed(1)}K / Ask $${(orderbook.askDepth/1000).toFixed(1)}K | Imbalance: ${(orderbook.imbalance * 100).toFixed(0)}%`)
+      console.log(`[AI] Funding: ${funding.rate.toFixed(4)}% | Spread: ${orderbook.spread.toFixed(4)}%`)
+      console.log(`[AI] Analysis: ${aiResult.analysis}`)
+      console.log(`[AI] Patterns: ${aiResult.patterns.join(', ') || 'None detected'}`)
+      console.log(`[AI] Recommendation: ${aiResult.recommendation} (${aiResult.confidence}% confidence)`)
+      if (aiResult.insight) console.log(`[AI] Insight: ${aiResult.insight}`)
+      console.log('[AI] ═══════════════════════════════════════════════════════════')
+      
+      // Send to UI
+      mainWindow?.webContents.send('trader:marketIntel', entry)
+      
+    } catch (err: any) {
+      console.error('[AI] Market analysis error:', err.message)
+    }
+  }
+  
+  // Initialize market intelligence
+  marketJournal = loadMarketJournal()
+  learnedPatterns = loadLearnedPatterns()
+  
   // Balance & Position tracking
   let lastKnownBalance = { marginBalance: 0, availableBalance: 0, unrealizedPnl: 0 }
   let currentPosition: { side: 'long' | 'short' | null; size: number; entryPrice: number; unrealizedPnl: number } = { side: null, size: 0, entryPrice: 0, unrealizedPnl: 0 }
@@ -1487,6 +1847,12 @@ app.whenReady().then(() => {
     // Send config to engine for pattern analysis
     engineProcess?.send({ type: 'trader:start', config })
     
+    // Start ETHUSDT Market Intelligence - every 15 minutes
+    if (marketAnalysisInterval) clearInterval(marketAnalysisInterval)
+    runMarketAnalysis() // Run immediately on start
+    marketAnalysisInterval = setInterval(runMarketAnalysis, 15 * 60 * 1000) // Every 15 min
+    console.log('[AI] ETHUSDT Market Intelligence started - analyzing every 15 minutes')
+    
     return { success: true, startTime: traderStartTime, balance: lastKnownBalance }
   })
 
@@ -1502,6 +1868,7 @@ app.whenReady().then(() => {
     if (uptimeInterval) { clearInterval(uptimeInterval); uptimeInterval = null }
     if (balanceInterval) { clearInterval(balanceInterval); balanceInterval = null }
     if (positionInterval) { clearInterval(positionInterval); positionInterval = null }
+    if (marketAnalysisInterval) { clearInterval(marketAnalysisInterval); marketAnalysisInterval = null }
     
     engineProcess?.send({ type: 'trader:stop' })
     return { success: true }
@@ -1636,6 +2003,11 @@ app.whenReady().then(() => {
   // Get signal log and stats
   ipcMain.handle('trader:getSignalLog', async () => {
     return { log: signalLog.slice(0, 50), stats: signalStats }
+  })
+  
+  // Get market journal entries
+  ipcMain.handle('trader:getMarketJournal', async () => {
+    return marketJournal.slice(0, 20)
   })
 
   // Get saved API keys - allows UI to check if keys exist without exposing secrets
